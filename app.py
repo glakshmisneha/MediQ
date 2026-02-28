@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import re
 import bcrypt
+import os
 from datetime import datetime
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
@@ -35,7 +36,6 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    # Fix for "PyBytes" error by handling string/memoryview conversion
     if isinstance(hashed, str): hashed = hashed.encode('utf-8')
     elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
@@ -44,12 +44,11 @@ def check_password(password, hashed):
 
 st.set_page_config(page_title="MediVista Admin", layout="wide")
 
-# Custom CSS for UI matching your screenshots
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
-    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
-    .stSidebar { background-color: #0e1117; }
+    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
+    .logout-btn>button { background-color: #ff4b4b !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -89,10 +88,15 @@ if not st.session_state.logged_in:
 
 # ================= MAIN APP ================= #
 else:
+    # Sidebar Navigation
     st.sidebar.title("MediVista Admin")
-    page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports"])
+    st.sidebar.write(f"User: **{st.session_state.role}**")
+    
+    page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports", "Settings"])
 
-    if st.sidebar.button("Logout"):
+    # Sidebar Logout at the bottom
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Logout", key="sidebar_logout"):
         st.session_state.logged_in = False
         st.rerun()
 
@@ -104,7 +108,6 @@ else:
         patients = pd.read_sql_query("SELECT * FROM patients", conn)
         apps = pd.read_sql_query("SELECT * FROM appointments", conn)
         
-        # Metrics Row (Matching Screenshot)
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Visits", len(patients))
         m2.metric("Total Revenue", f"₹ {patients['amount_paid'].sum() if not patients.empty else 0.0}")
@@ -112,7 +115,6 @@ else:
 
         st.divider()
 
-        # Visits by Reason Chart (Matching Screenshot)
         if not patients.empty:
             st.write("### Visits by Reason")
             reasons = patients['reason'].value_counts().reset_index()
@@ -142,7 +144,6 @@ else:
             c1, c2 = st.columns(2)
             name = c1.text_input("Name")
             age = c2.number_input("Age", 0)
-            # CHANGE: Selection for Blood Group
             blood = c1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
             reason = c2.text_input("Reason")
             pay = c1.number_input("Payment", 0.0)
@@ -159,23 +160,27 @@ else:
         p_df = pd.read_sql_query("SELECT id, name FROM patients", conn)
         d_df = pd.read_sql_query("SELECT id, name, total_slots, booked_slots FROM doctors", conn)
         
-        p_sel = st.selectbox("Select Patient", p_df["name"]) if not p_df.empty else None
-        d_sel = st.selectbox("Select Doctor", d_df["name"]) if not d_df.empty else None
-        
-        if st.button("Book Appointment"):
-            doc = d_df[d_df["name"] == d_sel].iloc[0]
-            if doc["booked_slots"] < doc["total_slots"]:
-                pid = p_df[p_df["name"] == p_sel]["id"].iloc[0]
-                conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)",
-                            (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
-                conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
-                conn.commit()
-                st.success("Booked!")
-                st.rerun()
+        if not p_df.empty and not d_df.empty:
+            p_sel = st.selectbox("Select Patient", p_df["name"])
+            d_sel = st.selectbox("Select Doctor", d_df["name"])
+            
+            if st.button("Book Appointment"):
+                doc = d_df[d_df["name"] == d_sel].iloc[0]
+                if doc["booked_slots"] < doc["total_slots"]:
+                    pid = p_df[p_df["name"] == p_sel]["id"].iloc[0]
+                    conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)",
+                                (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
+                    conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
+                    conn.commit()
+                    st.rerun()
 
-        # Appointment Table (Matching Screenshot)
         st.write("### Recent Appointments")
-        st.dataframe(pd.read_sql_query("SELECT * FROM appointments", conn), width='stretch')
+        history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
+        if not history_df.empty:
+            # FIX: Convert IDs to strings to prevent Arrow Serialization Error
+            history_df['patient_id'] = history_df['patient_id'].astype(str)
+            history_df['doctor_id'] = history_df['doctor_id'].astype(str)
+            st.dataframe(history_df, width='stretch')
 
     # -------- REPORTS -------- #
     elif page == "Reports":
@@ -183,21 +188,46 @@ else:
         report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
         
         if not report_df.empty:
-            # PREVIEW BEFORE DOWNLOAD
             st.subheader("Report Content Preview")
             c1, c2 = st.columns(2)
-            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum()}")
+            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum():,.2f}")
             c2.metric("Total Records", len(report_df))
             st.dataframe(report_df, width='stretch')
 
             if st.button("Generate & Download PDF"):
-                fn = "MediVista_Report.pdf"
+                fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc = SimpleDocTemplate(fn, pagesize=A4)
-                parts = [Paragraph("MediVista Revenue Report", ParagraphStyle('Title', fontSize=18, spaceAfter=20)),
-                         Paragraph(f"Total Revenue: ₹{report_df['amount_paid'].sum()}", ParagraphStyle('Body', fontSize=12))]
+                parts = [Paragraph("<b>MediVista Revenue Report</b>", ParagraphStyle('Title', fontSize=18, spaceAfter=20, alignment=1)),
+                         Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')}", ParagraphStyle('Body', fontSize=12)),
+                         Paragraph(f"Total Revenue: ₹{report_df['amount_paid'].sum():,.2f}", ParagraphStyle('Body', fontSize=12))]
                 doc.build(parts)
                 with open(fn, "rb") as f:
-                    st.download_button("Click to Download", f, file_name=fn)
-        else: st.warning("No data found.")
+                    st.download_button("Download PDF", f, file_name=fn)
+        else: st.warning("No records found.")
+
+    # -------- SETTINGS (DATABASE CLEANER) -------- #
+    elif page == "Settings":
+        st.title("System Settings")
+        if st.session_state.role == "Admin":
+            st.subheader("Database Management")
+            st.warning("Warning: Clearing the database will delete ALL patients, doctors, and appointments.")
+            if st.button("Clear All Data"):
+                c = conn.cursor()
+                c.execute("DELETE FROM patients")
+                c.execute("DELETE FROM doctors")
+                c.execute("DELETE FROM appointments")
+                conn.commit()
+                st.success("Database cleared successfully.")
+                st.rerun()
+        else:
+            st.info("Settings are restricted to Admin users.")
+
+    # Page Bottom Logout
+    st.markdown("---")
+    st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
+    if st.button("Logout Session"):
+        st.session_state.logged_in = False
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
     conn.close()
