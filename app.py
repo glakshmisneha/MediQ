@@ -7,7 +7,6 @@ import bcrypt
 from datetime import datetime
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 import os
@@ -23,16 +22,22 @@ def init_db():
     conn = connect_db()
     c = conn.cursor()
 
-    # USERS TABLE (Safe Create)
+    # Create users table if not exists (without assuming role column)
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
         email TEXT PRIMARY KEY,
-        password BLOB,
-        role TEXT
+        password BLOB
     )
     """)
 
-    # DOCTORS TABLE
+    # Check if 'role' column exists
+    c.execute("PRAGMA table_info(users)")
+    columns = [col[1] for col in c.fetchall()]
+
+    if "role" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Receptionist'")
+
+    # Doctors table
     c.execute("""
     CREATE TABLE IF NOT EXISTS doctors(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +48,7 @@ def init_db():
     )
     """)
 
-    # PATIENTS TABLE
+    # Patients table
     c.execute("""
     CREATE TABLE IF NOT EXISTS patients(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +61,7 @@ def init_db():
     )
     """)
 
-    # APPOINTMENTS TABLE
+    # Appointments table
     c.execute("""
     CREATE TABLE IF NOT EXISTS appointments(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,7 +123,7 @@ if not st.session_state.logged_in:
             else:
                 hashed = hash_password(password)
                 try:
-                    c.execute("INSERT INTO users VALUES (?,?,?)",
+                    c.execute("INSERT INTO users (email,password,role) VALUES (?,?,?)",
                               (email, sqlite3.Binary(hashed), role))
                     conn.commit()
                     st.success("Account Created Successfully")
@@ -185,7 +190,6 @@ else:
     elif page == "Doctors":
 
         if st.session_state.role == "Admin":
-
             st.subheader("Add Doctor")
             name = st.text_input("Name")
             specialty = st.text_input("Specialty")
