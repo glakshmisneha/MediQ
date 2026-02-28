@@ -5,6 +5,10 @@ import plotly.express as px
 import bcrypt
 import os
 from datetime import datetime
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import inch
 
 # 1. Page Configuration (Must be first)
 st.set_page_config(page_title="MediVista Admin", layout="wide")
@@ -57,7 +61,6 @@ if not st.session_state.logged_in:
     password = st.text_input("Password", type="password")
 
     if mode == "Register":
-        # Updated: Added 'Hospital Staff' option
         role = st.selectbox("Role", ["Admin", "Receptionist", "Hospital Staff"])
         if st.button("Create Account"):
             hashed = hash_password(password)
@@ -65,7 +68,7 @@ if not st.session_state.logged_in:
             try:
                 conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", (email, sqlite3.Binary(hashed), role))
                 conn.commit()
-                st.success("Account Created Successfully! Please switch to Login.")
+                st.success("Account Created Successfully!")
             except: st.error("User already exists.")
             conn.close()
 
@@ -83,8 +86,7 @@ if not st.session_state.logged_in:
 # ================= MAIN APPLICATION ================= #
 else:
     st.sidebar.title("MediVista Admin")
-    # Updated: Settings removed from radio list
-    page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments"])
+    page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports"])
 
     st.sidebar.markdown("---")
     if st.sidebar.button("Logout"):
@@ -116,11 +118,12 @@ else:
     # -------- DOCTORS ALLOTMENT -------- #
     elif page == "Doctors Allotment":
         st.title("Doctors Allotment")
+        specialties = ["Cardiology", "Dermatology", "Neurology", "Pediatrics", "Orthopedics", "General Medicine"]
         with st.expander("➕ Add Doctor Details"):
             with st.form("doc_form"):
                 n = st.text_input("Doctor Name")
-                s = st.text_input("Specialty")
-                sl = st.number_input("Slots", 1, 100)
+                s = st.selectbox("Specialty", specialties)
+                sl = st.number_input("Daily Slots", 1, 100)
                 if st.form_submit_button("Save Doctor"):
                     conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
                     conn.commit()
@@ -162,14 +165,47 @@ else:
                                 (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
-                    st.success("Appointment Booked!")
                     st.rerun()
         
-        st.write("### Recent History")
         history = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history.empty:
             history['patient_id'] = history['patient_id'].astype(str)
             history['doctor_id'] = history['doctor_id'].astype(str)
         st.dataframe(history, use_container_width=True)
+
+    # -------- REPORTS SESSION -------- #
+    elif page == "Reports":
+        st.title("📊 Hospital Reports")
+        report_df = pd.read_sql_query("SELECT name, blood_group, reason, amount_paid, visit_date FROM patients", conn)
+        
+        if not report_df.empty:
+            st.subheader("Report Content Preview")
+            c1, c2 = st.columns(2)
+            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum():,.2f}")
+            c2.metric("Total Records", len(report_df))
+            
+            st.dataframe(report_df, use_container_width=True)
+            
+            if st.button("Generate & Download PDF Report"):
+                fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+                doc_pdf = SimpleDocTemplate(fn, pagesize=A4)
+                parts = []
+                
+                # Report Styles
+                title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
+                body_style = ParagraphStyle('Normal', fontSize=12, spaceAfter=10)
+                
+                parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
+                parts.append(Paragraph(f"<b>Date Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
+                parts.append(Spacer(1, 0.2 * inch))
+                parts.append(Paragraph(f"<b>Total Patients Seen:</b> {len(report_df)}", body_style))
+                parts.append(Paragraph(f"<b>Total Gross Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
+                
+                doc_pdf.build(parts)
+                
+                with open(fn, "rb") as f:
+                    st.download_button("Click here to Download PDF", f, file_name=fn)
+        else:
+            st.warning("No records found to generate a report.")
 
     conn.close()
