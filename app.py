@@ -43,18 +43,12 @@ def check_password(password, hashed):
 # ================= UI STYLING ================= #
 st.markdown("""
     <style>
-    /* Dashboard Metric Styling */
-    div[data-testid="stMetricValue"] { color: #ffffff; font-size: 42px; font-weight: bold; }
-    div[data-testid="stMetricLabel"] { color: #888888; font-size: 16px; }
-    
-    /* Button Styling */
-    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100px; }
-    
-    /* Sidebar Styling */
+    div[data-testid="stMetricValue"] { color: #ffffff; font-size: 40px; font-weight: bold; }
+    div[data-testid="stMetricLabel"] { color: #888888; font-size: 14px; }
+    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
     .stSidebar { background-color: #0e1117; }
-    
-    /* Form and Dataframe Styling */
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
+    .logout-container { padding: 40px 0px; text-align: center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -94,46 +88,59 @@ if not st.session_state.logged_in:
 # ================= MAIN APPLICATION ================= #
 else:
     st.sidebar.title("MediVista Admin")
-    st.sidebar.info(f"Access Level: **{st.session_state.role}**")
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports"])
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("Logout", key="sidebar_logout"):
         st.session_state.logged_in = False
         st.rerun()
 
     conn = sqlite3.connect(DB_NAME)
 
-    # -------- DASHBOARD (MATCHING YOUR SCREENSHOTS) -------- #
+    # -------- DASHBOARD -------- #
     if page == "Dashboard":
         st.title("Hospital Dashboard")
         patients = pd.read_sql_query("SELECT * FROM patients", conn)
         apps = pd.read_sql_query("SELECT * FROM appointments", conn)
         
-        # Metric Row
-        m1, m2, m3 = st.columns(3)
+        # TOP ROW: 4 Metrics
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Visits", len(patients))
         m2.metric("Total Revenue", f"₹ {patients['amount_paid'].sum() if not patients.empty else 0.0}")
         m3.metric("Total Appointments", len(apps))
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        daily_rev = patients[patients['visit_date'] == today_str]['amount_paid'].sum() if not patients.empty else 0.0
+        m4.metric("Today's Revenue", f"₹ {daily_rev}")
 
         st.divider()
-        
-        if not patients.empty:
-            # Bar Chart: Visits by Reason
-            st.subheader("Visits by Reason")
-            reasons = patients['reason'].value_counts().reset_index()
-            reasons.columns = ['reason', 'count']
-            fig_reason = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-            fig_reason.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_reason, width='stretch')
 
-            # Bar Chart: Doctor Workload Distribution
-            st.subheader("Doctor Workload Distribution")
-            doc_data = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
-            if not doc_data.empty:
-                fig_doc = px.bar(doc_data, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
-                fig_doc.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_doc, width='stretch')
+        # GRAPH ROW: All 3 graphs next to each other
+        if not patients.empty:
+            g1, g2, g3 = st.columns(3)
+
+            with g1:
+                st.write("### Visits by Reason")
+                reasons = patients['reason'].value_counts().reset_index()
+                reasons.columns = ['reason', 'count']
+                fig1 = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
+                fig1.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig1, width='stretch')
+
+            with g2:
+                st.write("### Revenue Trend")
+                daily_data = patients.groupby('visit_date')['amount_paid'].sum().reset_index()
+                fig2 = px.line(daily_data, x='visit_date', y='amount_paid', markers=True, color_discrete_sequence=['#00acee'])
+                fig2.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig2, width='stretch')
+
+            with g3:
+                st.write("### Doctor Workload")
+                doc_data = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
+                if not doc_data.empty:
+                    fig3 = px.bar(doc_data, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
+                    fig3.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig3, width='stretch')
 
     # -------- DOCTORS ALLOTMENT -------- #
     elif page == "Doctors Allotment":
@@ -187,7 +194,6 @@ else:
                     conn.commit()
                     st.rerun()
         
-        st.write("### Recent History")
         history = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history.empty:
             history['patient_id'] = history['patient_id'].astype(str)
@@ -198,26 +204,27 @@ else:
     elif page == "Reports":
         st.title("📊 Hospital Reports")
         report_df = pd.read_sql_query("SELECT name, blood_group, reason, amount_paid, visit_date FROM patients", conn)
-        
         if not report_df.empty:
             st.subheader("Report Content Preview")
             st.metric("Total Revenue Preview", f"₹ {report_df['amount_paid'].sum():,.2f}")
             st.dataframe(report_df, width='stretch')
-            
             if st.button("Generate & Download PDF"):
                 fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc_pdf = SimpleDocTemplate(fn, pagesize=A4)
-                parts = []
-                title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
-                body_style = ParagraphStyle('Normal', fontSize=12, spaceAfter=10)
-                parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
-                parts.append(Paragraph(f"<b>Date Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
-                parts.append(Spacer(1, 0.2 * inch))
-                parts.append(Paragraph(f"<b>Total Gross Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
+                parts = [Paragraph("<b>MediVista Hospital Revenue Report</b>", ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)),
+                         Paragraph(f"<b>Date Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", ParagraphStyle('Body', fontSize=12))]
                 doc_pdf.build(parts)
                 with open(fn, "rb") as f:
                     st.download_button("Download PDF", f, file_name=fn)
-        else:
-            st.warning("No data found to generate a report.")
+
+    # -------- FINAL LOGOUT SECTION -------- #
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown('<div class="logout-container">', unsafe_allow_html=True)
+    st.write("### Exit System")
+    if st.button("Final Logout", key="bottom_logout"):
+        st.session_state.logged_in = False
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
     conn.close()
