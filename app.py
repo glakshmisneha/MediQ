@@ -4,7 +4,6 @@ import pandas as pd
 import plotly.express as px
 import bcrypt
 import re
-import os
 from datetime import datetime, time
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
@@ -55,7 +54,6 @@ def is_valid_gmail(email):
     return bool(re.match(r"^[a-zA-Z0-9._%+-]+@gmail\.com$", email))
 
 def is_strong_password(password):
-    # Rules: 8+ chars, 1 Capital, 1 Number
     if len(password) < 8 or not any(c.isupper() for c in password) or not any(c.isdigit() for c in password):
         return False, "8+ chars, 1 Upper, 1 Number"
     return True, ""
@@ -66,7 +64,7 @@ st.markdown("""
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
     .stSidebar { background-color: #0e1117; }
-    /* Position Logout to bottom-left corner */
+    /* Position Logout to bottom-left */
     .sidebar-logout { position: fixed; bottom: 20px; left: 20px; width: 220px; z-index: 999; }
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
     </style>
@@ -101,10 +99,10 @@ if not st.session_state.logged_in:
     if mode == "Login":
         if st.button("Login"):
             conn = sqlite3.connect(DB_NAME)
-            res = conn.execute("SELECT password, role FROM users WHERE email=?", (e_in,)).fetchone()
+            res = conn.execute("SELECT password, role FROM users WHERE email=?", (email_in,)).fetchone()
             conn.close()
-            if res and check_password(p_in, res[0]):
-                st.session_state.logged_in, st.session_state.role, st.session_state.user_email = True, res[1], e_in
+            if res and check_password(password_input, res[0]):
+                st.session_state.logged_in, st.session_state.role, st.session_state.user_email = True, res[1], email_in
                 st.rerun()
             else: st.error("Invalid Credentials")
 
@@ -115,7 +113,6 @@ else:
         st.title("MediVista Admin")
         st.write(f"**Current Role:** {st.session_state.role}")
         
-        # Navigation logic based on role
         if st.session_state.role == "Admin":
             nav = st.radio("Navigation", ["Dashboard", "Doctors Allotment", "Room Management", "Reports"])
         elif st.session_state.role == "Hospital Staff":
@@ -135,8 +132,48 @@ else:
     conn = sqlite3.connect(DB_NAME)
     today_str = datetime.now().strftime("%Y-%m-%d")
 
+    # ---------------- RECEPTIONIST INTERFACE (RESTORED) ---------------- #
+    if st.session_state.role == "Receptionist":
+        st.title("📞 Receptionist Area")
+        tab_list, tab_book = st.tabs(["Today's Booking List", "Book New Appointment"])
+
+        with tab_list:
+            st.subheader(f"Schedule for {today_str}")
+            # Join tables to show readable names instead of IDs
+            bookings_df = pd.read_sql_query(f"""
+                SELECT a.id as 'Appt ID', p.name as 'Patient Name', d.name as 'Doctor Name', a.appointment_date as 'Date'
+                FROM appointments a
+                JOIN patients p ON a.patient_id = p.id
+                JOIN doctors d ON a.doctor_id = d.id
+                WHERE a.appointment_date = '{today_str}'
+            """, conn)
+            if not bookings_df.empty:
+                st.dataframe(bookings_df, width='stretch')
+            else:
+                st.info("No bookings recorded for today.")
+
+        with tab_book:
+            st.subheader("Register Appointment")
+            with st.form("reception_booking_form"):
+                p_data = pd.read_sql_query("SELECT id, name FROM patients", conn)
+                d_data = pd.read_sql_query("SELECT id, name FROM doctors", conn)
+                
+                if not p_data.empty and not d_data.empty:
+                    sel_patient = st.selectbox("Select Patient", p_data['name'])
+                    sel_doctor = st.selectbox("Select Doctor", d_data['name'])
+                    
+                    if st.form_submit_button("Book Appointment"):
+                        pid = p_data[p_data['name'] == sel_patient]['id'].iloc[0]
+                        did = d_data[d_data['name'] == sel_doctor]['id'].iloc[0]
+                        conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)", (int(pid), int(did), today_str))
+                        conn.commit()
+                        st.success(f"Appointment confirmed for {sel_patient} with {sel_doctor}!")
+                        st.rerun()
+                else:
+                    st.warning("Ensure patients and doctors are registered before booking.")
+
     # ---------------- ADMIN INTERFACE ---------------- #
-    if st.session_state.role == "Admin":
+    elif st.session_state.role == "Admin":
         if nav == "Dashboard":
             st.title("Hospital Dashboard")
             p_df = pd.read_sql_query("SELECT * FROM patients", conn)
@@ -145,10 +182,7 @@ else:
             # Dashboard Metrics
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Visits", len(p_df))
-            total_rev = p_df['amount_paid'].sum() if not p_df.empty else 0.0
-            m2.metric("Total Revenue", f"₹ {total_rev}")
-            
-            # Today's Revenue
+            m2.metric("Total Revenue", f"₹ {p_df['amount_paid'].sum() if not p_df.empty else 0.0}")
             daily_rev = p_df[p_df['visit_date'] == today_str]['amount_paid'].sum() if not p_df.empty else 0.0
             m3.metric("Today's Revenue", f"₹ {daily_rev}")
             m4.metric("Appointments", len(a_df))
@@ -238,19 +272,13 @@ else:
                 st.metric("Total Revenue Collection", f"₹ {report_df['amount_paid'].sum():,.2f}")
                 st.dataframe(report_df, width='stretch')
                 
-                # PDF Generation
                 if st.button("Generate & Download PDF"):
                     fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                     doc = SimpleDocTemplate(fn, pagesize=A4)
-                    parts = []
-                    title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
-                    body_style = ParagraphStyle('Body', fontSize=12, spaceAfter=10)
-                    
-                    parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
-                    parts.append(Paragraph(f"<b>Generated On:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
-                    parts.append(Spacer(1, 0.2 * inch))
-                    parts.append(Paragraph(f"<b>Total Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
-                    
+                    parts = [Paragraph("<b>MediVista Hospital Revenue Report</b>", ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)),
+                             Paragraph(f"<b>Generated On:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", ParagraphStyle('Body', fontSize=12, spaceAfter=10)),
+                             Spacer(1, 0.2 * inch),
+                             Paragraph(f"<b>Total Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", ParagraphStyle('Body', fontSize=12, spaceAfter=10))]
                     doc.build(parts)
                     with open(fn, "rb") as f:
                         st.download_button("Download Report", f, file_name=fn)
