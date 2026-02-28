@@ -36,8 +36,12 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    if isinstance(hashed, str): hashed = hashed.encode('utf-8')
-    elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
+    # DEBUG FIX: Explicitly handle cases where SQLite returns strings or memoryviews
+    # bcrypt.checkpw MUST receive bytes
+    if isinstance(hashed, str):
+        hashed = hashed.encode('utf-8')
+    elif isinstance(hashed, memoryview):
+        hashed = hashed.tobytes()
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
 # ================= CONFIG ================= #
@@ -48,8 +52,7 @@ st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
-    .logout-section { padding-top: 50px; }
-    .logout-btn>button { background-color: #ff4b4b !important; }
+    .logout-btn-bottom>button { background-color: #ff4b4b !important; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -70,7 +73,9 @@ if not st.session_state.logged_in:
             hashed = hash_password(password)
             conn = connect_db()
             try:
-                conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", (email, sqlite3.Binary(hashed), role))
+                # Use sqlite3.Binary to ensure bytes are stored correctly
+                conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", 
+                             (email, sqlite3.Binary(hashed), role))
                 conn.commit()
                 st.success("Account Created!")
             except: st.error("User exists")
@@ -89,15 +94,11 @@ if not st.session_state.logged_in:
 
 # ================= MAIN APP ================= #
 else:
-    # Sidebar Navigation
     st.sidebar.title("MediVista Admin")
     st.sidebar.write(f"Logged in as: **{st.session_state.role}**")
-    
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports", "Settings"])
 
-    # Sidebar Logout
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Logout", key="sidebar_logout"):
+    if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
@@ -174,23 +175,23 @@ else:
                                 (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
-                    st.success("Booked!")
                     st.rerun()
 
         st.write("### Recent Appointment History")
         history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history_df.empty:
-            # FIX: Standardize types to prevent Arrow/Serialization errors
+            # FIX: Convert IDs to strings to prevent Arrow Serialization Error
             history_df['patient_id'] = history_df['patient_id'].astype(str)
             history_df['doctor_id'] = history_df['doctor_id'].astype(str)
             st.dataframe(history_df, width='stretch')
 
     # -------- REPORTS -------- #
     elif page == "Reports":
-        st.title("Hospital Analytics & Reports")
+        st.title("Hospital Reports")
         report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
         
         if not report_df.empty:
+            # Live content preview before downloading
             st.subheader("Report Content Preview")
             c1, c2 = st.columns(2)
             c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum():,.2f}")
@@ -206,30 +207,28 @@ else:
                 doc.build(parts)
                 with open(fn, "rb") as f:
                     st.download_button("Download Report", f, file_name=fn)
-        else: st.warning("No records found to generate report.")
+        else: st.warning("No records found.")
 
-    # -------- SETTINGS (ADMIN ONLY) -------- #
+    # -------- SETTINGS -------- #
     elif page == "Settings":
-        st.title("Admin Settings")
+        st.title("System Settings")
         if st.session_state.role == "Admin":
-            st.subheader("Database Maintenance")
-            st.error("DANGER ZONE: This will permanently delete your patient and appointment history.")
+            st.error("DANGER ZONE: This will permanently delete patient and appointment history.")
             if st.button("Clear All Data"):
                 c = conn.cursor()
                 c.execute("DELETE FROM patients")
                 c.execute("DELETE FROM doctors")
                 c.execute("DELETE FROM appointments")
                 conn.commit()
-                st.success("Database cleared. Refreshing...")
+                st.success("Database cleared!")
                 st.rerun()
         else:
-            st.info("System settings are only accessible by Administrators.")
+            st.info("Settings are restricted to Admin users.")
 
-    # Bottom Logout Button
-    st.markdown('<div class="logout-section">', unsafe_allow_html=True)
-    st.markdown("---")
-    st.write("### Exit Session")
-    if st.button("Logout System", key="main_logout"):
+    # BOTTOM LOGOUT BUTTON
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown('<div class="logout-btn-bottom">', unsafe_allow_html=True)
+    if st.button("Logout Session"):
         st.session_state.logged_in = False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
