@@ -19,6 +19,7 @@ DB_NAME = "mediq.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    # Ensure all tables exist
     c.execute("CREATE TABLE IF NOT EXISTS users(email TEXT PRIMARY KEY, password BLOB, role TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS doctors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, specialty TEXT, total_slots INTEGER, booked_slots INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, blood_group TEXT, reason TEXT, amount_paid REAL, visit_date TEXT)")
@@ -33,6 +34,7 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
+    # Fix for bytes/string mismatch
     if isinstance(hashed, str): hashed = hashed.encode('utf-8')
     elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
     try:
@@ -61,6 +63,7 @@ if not st.session_state.logged_in:
     password = st.text_input("Password", type="password")
 
     if mode == "Register":
+        # Role includes 'Hospital Staff'
         role = st.selectbox("Role", ["Admin", "Receptionist", "Hospital Staff"])
         if st.button("Create Account"):
             hashed = hash_password(password)
@@ -113,12 +116,13 @@ else:
             reasons.columns = ['reason', 'count']
             fig = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
             fig.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
+            # FIX: width='stretch'
+            st.plotly_chart(fig, width='stretch')
 
     # -------- DOCTORS ALLOTMENT -------- #
     elif page == "Doctors Allotment":
         st.title("Doctors Allotment")
-        specialties = ["Cardiology", "Dermatology", "Neurology", "Pediatrics", "Orthopedics", "General Medicine"]
+        specialties = ["Cardiology", "Dermatology", "Neurology", "Pediatrics", "Orthopedics", "General Medicine", "Oncology", "Psychiatry"]
         with st.expander("➕ Add Doctor Details"):
             with st.form("doc_form"):
                 n = st.text_input("Doctor Name")
@@ -127,8 +131,11 @@ else:
                 if st.form_submit_button("Save Doctor"):
                     conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
                     conn.commit()
+                    st.success(f"Dr. {n} added!")
                     st.rerun()
-        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), use_container_width=True)
+        
+        # FIX: width='stretch'
+        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), width='stretch')
 
     # -------- PATIENT DETAILS -------- #
     elif page == "Patient Details":
@@ -145,8 +152,11 @@ else:
                     conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
                                 (name, age, blood, reason, pay, datetime.now().strftime("%Y-%m-%d")))
                     conn.commit()
+                    st.success("Patient registered!")
                     st.rerun()
-        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), use_container_width=True)
+        
+        # FIX: width='stretch'
+        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), width='stretch')
 
     # -------- APPOINTMENTS -------- #
     elif page == "Appointments":
@@ -165,47 +175,46 @@ else:
                                 (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
+                    st.success("Booked!")
                     st.rerun()
         
         history = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history.empty:
+            # FIX: Convert IDs to string to avoid Arrow Errors
             history['patient_id'] = history['patient_id'].astype(str)
             history['doctor_id'] = history['doctor_id'].astype(str)
-        st.dataframe(history, use_container_width=True)
+        
+        # FIX: width='stretch'
+        st.dataframe(history, width='stretch')
 
-    # -------- REPORTS SESSION -------- #
+    # -------- REPORTS -------- #
     elif page == "Reports":
         st.title("📊 Hospital Reports")
         report_df = pd.read_sql_query("SELECT name, blood_group, reason, amount_paid, visit_date FROM patients", conn)
         
         if not report_df.empty:
             st.subheader("Report Content Preview")
-            c1, c2 = st.columns(2)
-            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum():,.2f}")
-            c2.metric("Total Records", len(report_df))
+            st.metric("Total Revenue Preview", f"₹ {report_df['amount_paid'].sum():,.2f}")
             
-            st.dataframe(report_df, use_container_width=True)
+            # FIX: width='stretch'
+            st.dataframe(report_df, width='stretch')
             
-            if st.button("Generate & Download PDF Report"):
+            if st.button("Generate & Download PDF"):
                 fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc_pdf = SimpleDocTemplate(fn, pagesize=A4)
                 parts = []
-                
-                # Report Styles
                 title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
                 body_style = ParagraphStyle('Normal', fontSize=12, spaceAfter=10)
                 
                 parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
                 parts.append(Paragraph(f"<b>Date Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
                 parts.append(Spacer(1, 0.2 * inch))
-                parts.append(Paragraph(f"<b>Total Patients Seen:</b> {len(report_df)}", body_style))
                 parts.append(Paragraph(f"<b>Total Gross Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
                 
                 doc_pdf.build(parts)
-                
                 with open(fn, "rb") as f:
-                    st.download_button("Click here to Download PDF", f, file_name=fn)
+                    st.download_button("Download PDF", f, file_name=fn)
         else:
-            st.warning("No records found to generate a report.")
+            st.warning("No data found to generate a report.")
 
     conn.close()
