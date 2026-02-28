@@ -53,9 +53,9 @@ def init_db():
 
 init_db()
 
-# ================= HELPERS ================= #
+# ================= HELPER LOGIC ================= #
 def get_available_slots(doctor_id, shift_str, date_str):
-    """Generates 20-minute intervals and filters booked ones."""
+    """Generates sequential 20-minute intervals."""
     try:
         start_str, end_str = shift_str.split(" - ")
         start_dt = datetime.strptime(start_str, "%H:%M")
@@ -72,17 +72,11 @@ def get_available_slots(doctor_id, shift_str, date_str):
     conn.close()
     return [s for s in slots if s not in booked['appointment_time'].tolist()]
 
-def check_password(password, hashed):
-    if isinstance(hashed, str): hashed = hashed.encode('utf-8')
-    elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
-    try: return bcrypt.checkpw(password.encode('utf-8'), hashed)
-    except: return False
-
 # ================= UI STYLING ================= #
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
-    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
+    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
     .stSidebar { background-color: #0e1117; }
     .sidebar-logout { position: fixed; bottom: 20px; left: 20px; width: 220px; z-index: 999; }
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
@@ -103,7 +97,7 @@ if not st.session_state.logged_in:
         role = st.selectbox("Role", ["Admin", "Receptionist", "Hospital Staff", "Doctor", "Patient"])
         if st.button("Create Account"):
             if not bool(re.match(r"^[a-zA-Z0-9._%+-]+@gmail\.com$", e_in)): st.error("Email must be @gmail.com")
-            elif len(p_in) < 8 or not any(c.isupper() for c in p_in): st.error("Password: 8+ chars & 1 Uppercase")
+            elif len(p_in) < 8 or not any(c.isupper() for c in p_in): st.error("8+ chars & 1 Uppercase")
             else:
                 conn = sqlite3.connect(DB_NAME)
                 hashed = bcrypt.hashpw(p_in.encode(), bcrypt.gensalt())
@@ -111,7 +105,7 @@ if not st.session_state.logged_in:
                     conn.execute("INSERT INTO users VALUES (?,?,?)", (e_in, sqlite3.Binary(hashed), role))
                     conn.commit()
                     st.success("Registration Successful!")
-                except: st.error("User exists.")
+                except: st.error("User already exists.")
                 conn.close()
 
     if mode == "Login":
@@ -119,7 +113,7 @@ if not st.session_state.logged_in:
             conn = sqlite3.connect(DB_NAME)
             res = conn.execute("SELECT password, role FROM users WHERE email=?", (e_in,)).fetchone()
             conn.close()
-            if res and check_password(p_in, res[0]):
+            if res and bcrypt.checkpw(p_in.encode(), res[0] if isinstance(res[0], bytes) else res[0].tobytes()):
                 st.session_state.logged_in, st.session_state.role, st.session_state.user_email = True, res[1], e_in
                 st.rerun()
             else: st.error("Invalid Credentials")
@@ -132,12 +126,14 @@ else:
             nav = st.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Room Management", "Reports"])
         elif st.session_state.role == "Receptionist":
             nav = st.radio("Navigation", ["Reception Area"])
+        elif st.session_state.role == "Hospital Staff":
+            nav = st.radio("Navigation", ["Duty Board"])
         elif st.session_state.role == "Doctor":
-            nav = st.radio("Navigation", ["Patient Queries", "My Schedule"])
-        else: nav = "Portal"
+            nav = st.radio("Navigation", ["Doctor Room"])
+        else: nav = st.radio("Navigation", ["Patient Portal"])
 
         st.markdown('<div class="sidebar-logout">', unsafe_allow_html=True)
-        if st.button("Logout", use_container_width=True):
+        if st.button("Logout"):
             st.session_state.logged_in = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
@@ -145,41 +141,66 @@ else:
     conn = sqlite3.connect(DB_NAME)
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # ---------------- DOCTOR INTERFACE (UPDATED) ---------------- #
-    if st.session_state.role == "Doctor":
-        if nav == "Patient Queries":
-            st.title("🩺 Patient Feedback & Queries")
-            # Fetches all queries directed to doctors
-            q_df = pd.read_sql_query("SELECT name as Patient, email, query as Message, is_complaint FROM queries", conn)
-            
-            if not q_df.empty:
-                st.error("🚨 Formal Complaints")
-                st.dataframe(q_df[q_df['is_complaint'] == 1], width='stretch')
-                
-                st.info("❓ General Inquiries")
-                st.dataframe(q_df[q_df['is_complaint'] == 0], width='stretch')
-            else:
-                st.success("No new queries or complaints at this time.")
+    # ---------------- ADMIN INTERFACE ---------------- #
+    if st.session_state.role == "Admin":
+        if nav == "Dashboard":
+            st.title("Hospital Dashboard")
+            p_df = pd.read_sql_query("SELECT * FROM patients", conn)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Visits", len(p_df))
+            m2.metric("Total Revenue", f"₹ {p_df['amount_paid'].sum() if not p_df.empty else 0.0}")
+            m3.metric("Today's Revenue", f"₹ {p_df[p_df['visit_date'] == today_str]['amount_paid'].sum() if not p_df.empty else 0.0}")
+            m4.metric("Appointments", pd.read_sql_query("SELECT COUNT(*) FROM appointments", conn).iloc[0,0])
+            st.divider()
+            g1, g2, g3 = st.columns(3)
+            if not p_df.empty:
+                with g1:
+                    fig1 = px.bar(p_df['reason'].value_counts().reset_index(), x='reason', y='count', color_discrete_sequence=['#87CEFA'])
+                    fig1.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig1, use_container_width=True)
+                with g2:
+                    fig2 = px.line(p_df.groupby('visit_date')['amount_paid'].sum().reset_index(), x='visit_date', y='amount_paid', markers=True)
+                    fig2.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig2, use_container_width=True)
+                with g3:
+                    doc_w = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
+                    fig3 = px.bar(doc_w, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
+                    fig3.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig3, use_container_width=True)
 
-        elif nav == "My Schedule":
-            st.title("📅 Today's 20-Min Appointments")
-            sched = pd.read_sql_query(f"""
-                SELECT p.name as Patient, a.appointment_time as Time, p.reason 
-                FROM appointments a 
-                JOIN patients p ON a.patient_id = p.id 
-                WHERE a.appointment_date = '{today_str}' 
-                ORDER BY Time ASC""", conn)
-            st.dataframe(sched, width='stretch')
+        elif nav == "Doctors Allotment":
+            st.title("Staff & Shift Management")
+            t1, t2 = st.tabs(["Add Doctor", "Edit Records"])
+            with t1:
+                with st.form("admin_add_doc"):
+                    dn, ds = st.text_input("Doctor Name"), st.selectbox("Specialty", ["General Medicine", "Cardiology", "Neurology"])
+                    nr = st.text_input("Allocate Nurse")
+                    t_st, t_en = st.time_input("Shift Start"), st.time_input("Shift End")
+                    if st.form_submit_button("Save Details"):
+                        shft = f"{t_st.strftime('%H:%M')} - {t_en.strftime('%H:%M')}"
+                        conn.execute("INSERT INTO doctors (name, specialty, total_slots, nurse_assigned, shift_timing) VALUES (?,?,?,?,?)", (dn, ds, 10, nr, shft))
+                        conn.commit(); st.rerun()
+
+        elif nav == "Room Management":
+            st.title("🛌 Room & Bed Management")
+            with st.expander("➕ Add New Hospital Room"):
+                with st.form("add_room"):
+                    r_no, r_ty = st.text_input("Room No"), st.selectbox("Type", ["General", "ICU", "Private"])
+                    if st.form_submit_button("Register"):
+                        conn.execute("INSERT INTO rooms (room_no, type) VALUES (?,?)", (r_no, r_ty))
+                        conn.commit(); st.rerun()
+            rooms = pd.read_sql_query("SELECT * FROM rooms", conn)
+            st.dataframe(rooms, use_container_width=True)
 
     # ---------------- RECEPTIONIST INTERFACE (20-MIN SLOTS) ---------------- #
     elif st.session_state.role == "Receptionist":
         st.title("📞 Reception Management")
         t1, t2, t3 = st.tabs(["Register Patient", "Book 20-Min Slot", "Edit Info"])
         with t1:
-            with st.form("rec_reg"):
-                pn, pa = st.text_input("Name"), st.number_input("Age", 1, 120, 25)
-                pb = st.selectbox("Blood", ["A+", "B+", "O+", "AB+", "A-", "B-", "O-", "AB-"])
-                pr, pp = st.text_input("Reason"), st.number_input("Payment (₹)", 0.0)
+            with st.form("rec_reg_p"):
+                pn, pa = st.text_input("Full Name"), st.number_input("Age", 1, 120, 25)
+                pb, pr = st.selectbox("Blood Group", ["A+", "B+", "O+", "AB+", "A-", "B-", "O-", "AB-"]), st.text_input("Reason")
+                pp = st.number_input("Payment (₹)", 0.0)
                 if st.form_submit_button("Register"):
                     conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)", (pn, pa, pb, pr, pp, today_str))
                     conn.commit(); st.success(f"{pn} Registered!")
@@ -198,34 +219,42 @@ else:
                         conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date, appointment_time) VALUES (?,?,?,?)", (int(pid), int(dr['id']), today_str, tm))
                         conn.commit(); st.success(f"Booked for {tm}!"); st.rerun()
 
-    # ---------------- ADMIN INTERFACE ---------------- #
-    elif st.session_state.role == "Admin":
-        if nav == "Dashboard":
-            st.title("Hospital Dashboard")
-            p_df = pd.read_sql_query("SELECT * FROM patients", conn)
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Visits", len(p_df))
-            m2.metric("Total Revenue", f"₹ {p_df['amount_paid'].sum() if not p_df.empty else 0.0}")
-            m3.metric("Today's Revenue", f"₹ {p_df[p_df['visit_date'] == today_str]['amount_paid'].sum() if not p_df.empty else 0.0}")
-            m4.metric("Appointments", pd.read_sql_query("SELECT COUNT(*) FROM appointments", conn).iloc[0,0])
-            st.divider()
-            g1, g2, g3 = st.columns(3)
-            if not p_df.empty:
-                with g1:
-                    st.write("### Visits by Reason")
-                    fig1 = px.bar(p_df['reason'].value_counts().reset_index(), x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-                    fig1.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig1, use_container_width=True)
-                with g2:
-                    st.write("### Revenue Trend")
-                    fig2 = px.line(p_df.groupby('visit_date')['amount_paid'].sum().reset_index(), x='visit_date', y='amount_paid', markers=True)
-                    fig2.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig2, use_container_width=True)
-                with g3:
-                    st.write("### Doctor Workload")
-                    doc_w = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
-                    fig3 = px.bar(doc_w, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
-                    fig3.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig3, use_container_width=True)
+    # ---------------- HOSPITAL STAFF ---------------- #
+    elif st.session_state.role == "Hospital Staff":
+        st.title("👨‍⚕️ Staff Duty Board")
+        staff_df = pd.read_sql_query("SELECT name as Doctor, nurse_assigned as Nurse, shift_timing as Shift FROM doctors", conn)
+        st.table(staff_df)
+        st.subheader("Today's Appointments")
+        staff_appts = pd.read_sql_query(f"""
+            SELECT p.name as Patient, d.name as Doctor, a.appointment_time as Time 
+            FROM appointments a JOIN patients p ON a.patient_id = p.id 
+            JOIN doctors d ON a.doctor_id = d.id WHERE a.appointment_date = '{today_str}' 
+            ORDER BY Time ASC""", conn)
+        st.dataframe(staff_appts, use_container_width=True)
+
+    # ---------------- DOCTOR ---------------- #
+    elif st.session_state.role == "Doctor":
+        st.title("🩺 Doctor Room")
+        feedback = pd.read_sql_query("SELECT name as Patient, query as Message, is_complaint FROM queries", conn)
+        if not feedback.empty:
+            st.error("🚨 Complaints")
+            st.dataframe(feedback[feedback['is_complaint'] == 1], use_container_width=True)
+            st.info("❓ Patient Inquiries")
+            st.dataframe(feedback[feedback['is_complaint'] == 0], use_container_width=True)
+        else: st.write("No patient feedback found.")
+
+    # ---------------- PATIENT ---------------- #
+    elif st.session_state.role == "Patient":
+        st.title("🏥 Patient Portal")
+        with st.form("p_query"):
+            st.subheader("Submit Query or Complaint")
+            docs = pd.read_sql_query("SELECT name FROM doctors", conn)
+            t_doc = st.selectbox("Select Doctor", docs['name'])
+            msg = st.text_area("Your message")
+            comp = st.checkbox("Check if this is a formal complaint")
+            if st.form_submit_button("Submit"):
+                conn.execute("INSERT INTO queries (name, email, doctor_name, query, is_complaint) VALUES (?,?,?,?,?)", 
+                             ("Patient", st.session_state.user_email, t_doc, msg, 1 if comp else 0))
+                conn.commit(); st.success("Logged Successfully!")
 
     conn.close()
