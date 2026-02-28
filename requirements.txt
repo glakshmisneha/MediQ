@@ -1,5 +1,5 @@
 streamlit
+bcrypt
 pandas
 plotly
-bcrypt
 reportlab
