@@ -48,6 +48,7 @@ st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
+    .logout-section { padding-top: 50px; }
     .logout-btn>button { background-color: #ff4b4b !important; }
     </style>
     """, unsafe_allow_html=True)
@@ -90,11 +91,11 @@ if not st.session_state.logged_in:
 else:
     # Sidebar Navigation
     st.sidebar.title("MediVista Admin")
-    st.sidebar.write(f"User: **{st.session_state.role}**")
+    st.sidebar.write(f"Logged in as: **{st.session_state.role}**")
     
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports", "Settings"])
 
-    # Sidebar Logout at the bottom
+    # Sidebar Logout
     st.sidebar.markdown("---")
     if st.sidebar.button("Logout", key="sidebar_logout"):
         st.session_state.logged_in = False
@@ -127,11 +128,11 @@ else:
     elif page == "Doctors Allotment":
         st.title("Doctors Allotment")
         if st.session_state.role == "Admin":
-            with st.expander("Add Doctor"):
+            with st.expander("Add New Doctor"):
                 n = st.text_input("Name")
                 s = st.text_input("Specialty")
                 sl = st.number_input("Slots", 1)
-                if st.button("Add"):
+                if st.button("Save Doctor"):
                     conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
                     conn.commit()
                     st.rerun()
@@ -144,10 +145,11 @@ else:
             c1, c2 = st.columns(2)
             name = c1.text_input("Name")
             age = c2.number_input("Age", 0)
+            # Standardized Blood Group Selection
             blood = c1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
             reason = c2.text_input("Reason")
             pay = c1.number_input("Payment", 0.0)
-            if st.form_submit_button("Register"):
+            if st.form_submit_button("Register Patient"):
                 conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
                             (name, age, blood, reason, pay, datetime.now().strftime("%Y-%m-%d")))
                 conn.commit()
@@ -164,7 +166,7 @@ else:
             p_sel = st.selectbox("Select Patient", p_df["name"])
             d_sel = st.selectbox("Select Doctor", d_df["name"])
             
-            if st.button("Book Appointment"):
+            if st.button("Confirm Appointment"):
                 doc = d_df[d_df["name"] == d_sel].iloc[0]
                 if doc["booked_slots"] < doc["total_slots"]:
                     pid = p_df[p_df["name"] == p_sel]["id"].iloc[0]
@@ -172,19 +174,20 @@ else:
                                 (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
+                    st.success("Booked!")
                     st.rerun()
 
-        st.write("### Recent Appointments")
+        st.write("### Recent Appointment History")
         history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history_df.empty:
-            # FIX: Convert IDs to strings to prevent Arrow Serialization Error
+            # FIX: Standardize types to prevent Arrow/Serialization errors
             history_df['patient_id'] = history_df['patient_id'].astype(str)
             history_df['doctor_id'] = history_df['doctor_id'].astype(str)
             st.dataframe(history_df, width='stretch')
 
     # -------- REPORTS -------- #
     elif page == "Reports":
-        st.title("Hospital Reports")
+        st.title("Hospital Analytics & Reports")
         report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
         
         if not report_df.empty:
@@ -194,38 +197,39 @@ else:
             c2.metric("Total Records", len(report_df))
             st.dataframe(report_df, width='stretch')
 
-            if st.button("Generate & Download PDF"):
+            if st.button("Generate Revenue Report (PDF)"):
                 fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc = SimpleDocTemplate(fn, pagesize=A4)
-                parts = [Paragraph("<b>MediVista Revenue Report</b>", ParagraphStyle('Title', fontSize=18, spaceAfter=20, alignment=1)),
+                parts = [Paragraph("<b>MediVista Hospital Revenue Report</b>", ParagraphStyle('Title', fontSize=18, spaceAfter=20, alignment=1)),
                          Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')}", ParagraphStyle('Body', fontSize=12)),
                          Paragraph(f"Total Revenue: ₹{report_df['amount_paid'].sum():,.2f}", ParagraphStyle('Body', fontSize=12))]
                 doc.build(parts)
                 with open(fn, "rb") as f:
-                    st.download_button("Download PDF", f, file_name=fn)
-        else: st.warning("No records found.")
+                    st.download_button("Download Report", f, file_name=fn)
+        else: st.warning("No records found to generate report.")
 
-    # -------- SETTINGS (DATABASE CLEANER) -------- #
+    # -------- SETTINGS (ADMIN ONLY) -------- #
     elif page == "Settings":
-        st.title("System Settings")
+        st.title("Admin Settings")
         if st.session_state.role == "Admin":
-            st.subheader("Database Management")
-            st.warning("Warning: Clearing the database will delete ALL patients, doctors, and appointments.")
+            st.subheader("Database Maintenance")
+            st.error("DANGER ZONE: This will permanently delete your patient and appointment history.")
             if st.button("Clear All Data"):
                 c = conn.cursor()
                 c.execute("DELETE FROM patients")
                 c.execute("DELETE FROM doctors")
                 c.execute("DELETE FROM appointments")
                 conn.commit()
-                st.success("Database cleared successfully.")
+                st.success("Database cleared. Refreshing...")
                 st.rerun()
         else:
-            st.info("Settings are restricted to Admin users.")
+            st.info("System settings are only accessible by Administrators.")
 
-    # Page Bottom Logout
+    # Bottom Logout Button
+    st.markdown('<div class="logout-section">', unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
-    if st.button("Logout Session"):
+    st.write("### Exit Session")
+    if st.button("Logout System", key="main_logout"):
         st.session_state.logged_in = False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
