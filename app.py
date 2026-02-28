@@ -3,20 +3,20 @@ import sqlite3
 import pandas as pd
 import plotly.express as px
 import bcrypt
-import os
 import re
+import os
 from datetime import datetime, time
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 
-# 1. Page Configuration
+# 1. Page Configuration (Must be first)
 st.set_page_config(page_title="MediVista Admin", layout="wide")
 
 DB_NAME = "mediq.db"
 
-# ================= DATABASE INITIALIZATION & MIGRATIONS ================= #
+# ================= DATABASE INITIALIZATION ================= #
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -31,7 +31,7 @@ def init_db():
     c.execute("CREATE TABLE IF NOT EXISTS queries(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, doctor_name TEXT, query TEXT, is_complaint INTEGER DEFAULT 0, status TEXT DEFAULT 'Open')")
     c.execute("CREATE TABLE IF NOT EXISTS rooms(room_no TEXT PRIMARY KEY, type TEXT, status TEXT DEFAULT 'Available')")
     
-    # Schema Migration for shift timing and nurse assignment
+    # Schema Migration for updated fields
     c.execute("PRAGMA table_info(doctors)")
     existing_columns = [column[1] for column in c.fetchall()]
     if 'nurse_assigned' not in existing_columns:
@@ -56,9 +56,8 @@ def is_valid_gmail(email):
 
 def is_strong_password(password):
     # Rules: 8+ chars, 1 Capital, 1 Number
-    if len(password) < 8: return False, "Password must be at least 8 characters."
-    if not any(c.isupper() for c in password): return False, "Missing an uppercase letter."
-    if not any(c.isdigit() for c in password): return False, "Missing a number."
+    if len(password) < 8 or not any(c.isupper() for c in password) or not any(c.isdigit() for c in password):
+        return False, "8+ chars, 1 Upper, 1 Number"
     return True, ""
 
 # ================= UI STYLING ================= #
@@ -67,7 +66,7 @@ st.markdown("""
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
     .stSidebar { background-color: #0e1117; }
-    /* Repositions Logout to the bottom-left corner */
+    /* Position Logout to bottom-left corner */
     .sidebar-logout { position: fixed; bottom: 20px; left: 20px; width: 220px; z-index: 999; }
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
     </style>
@@ -95,7 +94,7 @@ if not st.session_state.logged_in:
                 try:
                     conn.execute("INSERT INTO users VALUES (?,?,?)", (e_in, sqlite3.Binary(hashed), role))
                     conn.commit()
-                    st.success("Registered Successfully!")
+                    st.success("Registered successfully!")
                 except: st.error("User already exists.")
                 conn.close()
 
@@ -111,7 +110,7 @@ if not st.session_state.logged_in:
 
 # ================= MAIN APPLICATION ================= #
 else:
-    # --- Sidebar and Navigation ---
+    # --- Sidebar Setup ---
     with st.sidebar:
         st.title("MediVista Admin")
         st.write(f"**Current Role:** {st.session_state.role}")
@@ -143,26 +142,40 @@ else:
             p_df = pd.read_sql_query("SELECT * FROM patients", conn)
             a_df = pd.read_sql_query("SELECT * FROM appointments", conn)
             
-            # Metrics
+            # Dashboard Metrics
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Visits", len(p_df))
-            m2.metric("Total Revenue", f"₹ {p_df['amount_paid'].sum() if not p_df.empty else 0.0}")
+            total_rev = p_df['amount_paid'].sum() if not p_df.empty else 0.0
+            m2.metric("Total Revenue", f"₹ {total_rev}")
+            
+            # Today's Revenue
             daily_rev = p_df[p_df['visit_date'] == today_str]['amount_paid'].sum() if not p_df.empty else 0.0
             m3.metric("Today's Revenue", f"₹ {daily_rev}")
             m4.metric("Appointments", len(a_df))
             
             st.divider()
             
-            # Graphs
+            # Side-by-side Graphs
             if not p_df.empty:
-                g1, g2 = st.columns(2)
-                fig1 = px.bar(p_df['reason'].value_counts().reset_index(), x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-                fig1.update_layout(template="plotly_dark")
-                g1.plotly_chart(fig1, width='stretch')
-                
-                fig2 = px.line(p_df.groupby('visit_date')['amount_paid'].sum().reset_index(), x='visit_date', y='amount_paid', markers=True)
-                fig2.update_layout(template="plotly_dark")
-                g2.plotly_chart(fig2, width='stretch')
+                g1, g2, g3 = st.columns(3)
+                with g1:
+                    st.write("### Visits by Reason")
+                    fig1 = px.bar(p_df['reason'].value_counts().reset_index(), x='reason', y='count', color_discrete_sequence=['#87CEFA'])
+                    fig1.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig1, width='stretch')
+                with g2:
+                    st.write("### Revenue Trend")
+                    daily_data = p_df.groupby('visit_date')['amount_paid'].sum().reset_index()
+                    fig2 = px.line(daily_data, x='visit_date', y='amount_paid', markers=True, color_discrete_sequence=['#00acee'])
+                    fig2.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig2, width='stretch')
+                with g3:
+                    st.write("### Doctor Workload")
+                    doc_w = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
+                    if not doc_w.empty:
+                        fig3 = px.bar(doc_w, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
+                        fig3.update_layout(template="plotly_dark")
+                        st.plotly_chart(fig3, width='stretch')
 
         elif nav == "Doctors Allotment":
             st.title("Manage Staff & Shifts")
@@ -171,7 +184,7 @@ else:
             with tab_add:
                 with st.form("admin_add_doc"):
                     c1, c2 = st.columns(2)
-                    dn, ds = c1.text_input("Name"), c2.selectbox("Specialty", ["General", "Cardiology", "Neurology"])
+                    dn, ds = c1.text_input("Name"), c2.selectbox("Specialty", ["General Medicine", "Cardiology", "Neurology"])
                     nr, sl = c1.text_input("Nurse"), c2.number_input("Slots", 1, 50)
                     t_st, t_en = st.time_input("Shift Start"), st.time_input("Shift End")
                     if st.form_submit_button("Save Doctor"):
@@ -217,29 +230,31 @@ else:
                             conn.commit(); st.rerun()
 
         elif nav == "Reports":
-            st.title("📊 Hospital Reports")
-            r_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
-            st.dataframe(r_df, width='stretch')
-            if st.button("Download PDF"):
-                fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
-                doc = SimpleDocTemplate(fn, pagesize=A4)
-                parts = [Paragraph("<b>MediVista Revenue Report</b>", ParagraphStyle('Title', fontSize=22, alignment=1))]
-                doc.build(parts)
-                with open(fn, "rb") as f:
-                    st.download_button("Download Now", f, file_name=fn)
-
-    # ---------------- PATIENT INTERFACE ---------------- #
-    elif st.session_state.role == "Patient":
-        st.title("🏥 Patient Portal")
-        with st.form("patient_query"):
-            st.write("### Submit Query or Complaint")
-            d_list = pd.read_sql_query("SELECT name FROM doctors", conn)
-            target = st.selectbox("Select Doctor", d_list['name'])
-            msg = st.text_area("Your message")
-            is_c = st.checkbox("Is this a complaint?")
-            if st.form_submit_button("Submit"):
-                conn.execute("INSERT INTO queries (name, email, doctor_name, query, is_complaint) VALUES (?,?,?,?,?)",
-                             ("Patient", st.session_state.user_email, target, msg, 1 if is_c else 0))
-                conn.commit(); st.success("Logged!")
+            st.title("📊 Financial & Activity Reports")
+            report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
+            
+            if not report_df.empty:
+                st.subheader("Financial Summary")
+                st.metric("Total Revenue Collection", f"₹ {report_df['amount_paid'].sum():,.2f}")
+                st.dataframe(report_df, width='stretch')
+                
+                # PDF Generation
+                if st.button("Generate & Download PDF"):
+                    fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+                    doc = SimpleDocTemplate(fn, pagesize=A4)
+                    parts = []
+                    title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
+                    body_style = ParagraphStyle('Body', fontSize=12, spaceAfter=10)
+                    
+                    parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
+                    parts.append(Paragraph(f"<b>Generated On:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
+                    parts.append(Spacer(1, 0.2 * inch))
+                    parts.append(Paragraph(f"<b>Total Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
+                    
+                    doc.build(parts)
+                    with open(fn, "rb") as f:
+                        st.download_button("Download Report", f, file_name=fn)
+            else:
+                st.warning("No records available to generate a report.")
 
     conn.close()
