@@ -19,7 +19,6 @@ DB_NAME = "mediq.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Ensure all tables exist
     c.execute("CREATE TABLE IF NOT EXISTS users(email TEXT PRIMARY KEY, password BLOB, role TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS doctors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, specialty TEXT, total_slots INTEGER, booked_slots INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, blood_group TEXT, reason TEXT, amount_paid REAL, visit_date TEXT)")
@@ -34,7 +33,6 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    # Fix for bytes/string mismatch
     if isinstance(hashed, str): hashed = hashed.encode('utf-8')
     elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
     try:
@@ -45,9 +43,17 @@ def check_password(password, hashed):
 # ================= UI STYLING ================= #
 st.markdown("""
     <style>
-    div[data-testid="stMetricValue"] { color: #00acee; font-size: 38px; font-weight: bold; }
-    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
+    /* Dashboard Metric Styling */
+    div[data-testid="stMetricValue"] { color: #ffffff; font-size: 42px; font-weight: bold; }
+    div[data-testid="stMetricLabel"] { color: #888888; font-size: 16px; }
+    
+    /* Button Styling */
+    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100px; }
+    
+    /* Sidebar Styling */
     .stSidebar { background-color: #0e1117; }
+    
+    /* Form and Dataframe Styling */
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
     </style>
     """, unsafe_allow_html=True)
@@ -63,7 +69,6 @@ if not st.session_state.logged_in:
     password = st.text_input("Password", type="password")
 
     if mode == "Register":
-        # Role includes 'Hospital Staff'
         role = st.selectbox("Role", ["Admin", "Receptionist", "Hospital Staff"])
         if st.button("Create Account"):
             hashed = hash_password(password)
@@ -89,6 +94,7 @@ if not st.session_state.logged_in:
 # ================= MAIN APPLICATION ================= #
 else:
     st.sidebar.title("MediVista Admin")
+    st.sidebar.info(f"Access Level: **{st.session_state.role}**")
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports"])
 
     st.sidebar.markdown("---")
@@ -98,31 +104,41 @@ else:
 
     conn = sqlite3.connect(DB_NAME)
 
-    # -------- DASHBOARD -------- #
+    # -------- DASHBOARD (MATCHING YOUR SCREENSHOTS) -------- #
     if page == "Dashboard":
         st.title("Hospital Dashboard")
         patients = pd.read_sql_query("SELECT * FROM patients", conn)
         apps = pd.read_sql_query("SELECT * FROM appointments", conn)
         
+        # Metric Row
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Visits", len(patients))
         m2.metric("Total Revenue", f"₹ {patients['amount_paid'].sum() if not patients.empty else 0.0}")
         m3.metric("Total Appointments", len(apps))
 
         st.divider()
+        
         if not patients.empty:
-            st.write("### Visits by Reason")
+            # Bar Chart: Visits by Reason
+            st.subheader("Visits by Reason")
             reasons = patients['reason'].value_counts().reset_index()
             reasons.columns = ['reason', 'count']
-            fig = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-            fig.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
-            # FIX: width='stretch'
-            st.plotly_chart(fig, width='stretch')
+            fig_reason = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
+            fig_reason.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_reason, width='stretch')
+
+            # Bar Chart: Doctor Workload Distribution
+            st.subheader("Doctor Workload Distribution")
+            doc_data = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
+            if not doc_data.empty:
+                fig_doc = px.bar(doc_data, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
+                fig_doc.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_doc, width='stretch')
 
     # -------- DOCTORS ALLOTMENT -------- #
     elif page == "Doctors Allotment":
         st.title("Doctors Allotment")
-        specialties = ["Cardiology", "Dermatology", "Neurology", "Pediatrics", "Orthopedics", "General Medicine", "Oncology", "Psychiatry"]
+        specialties = ["Cardiology", "Dermatology", "Neurology", "Pediatrics", "Orthopedics", "General Medicine"]
         with st.expander("➕ Add Doctor Details"):
             with st.form("doc_form"):
                 n = st.text_input("Doctor Name")
@@ -131,10 +147,7 @@ else:
                 if st.form_submit_button("Save Doctor"):
                     conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
                     conn.commit()
-                    st.success(f"Dr. {n} added!")
                     st.rerun()
-        
-        # FIX: width='stretch'
         st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), width='stretch')
 
     # -------- PATIENT DETAILS -------- #
@@ -152,10 +165,7 @@ else:
                     conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
                                 (name, age, blood, reason, pay, datetime.now().strftime("%Y-%m-%d")))
                     conn.commit()
-                    st.success("Patient registered!")
                     st.rerun()
-        
-        # FIX: width='stretch'
         st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), width='stretch')
 
     # -------- APPOINTMENTS -------- #
@@ -175,16 +185,13 @@ else:
                                 (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
-                    st.success("Booked!")
                     st.rerun()
         
+        st.write("### Recent History")
         history = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history.empty:
-            # FIX: Convert IDs to string to avoid Arrow Errors
             history['patient_id'] = history['patient_id'].astype(str)
             history['doctor_id'] = history['doctor_id'].astype(str)
-        
-        # FIX: width='stretch'
         st.dataframe(history, width='stretch')
 
     # -------- REPORTS -------- #
@@ -195,8 +202,6 @@ else:
         if not report_df.empty:
             st.subheader("Report Content Preview")
             st.metric("Total Revenue Preview", f"₹ {report_df['amount_paid'].sum():,.2f}")
-            
-            # FIX: width='stretch'
             st.dataframe(report_df, width='stretch')
             
             if st.button("Generate & Download PDF"):
@@ -205,12 +210,10 @@ else:
                 parts = []
                 title_style = ParagraphStyle('Title', fontSize=22, alignment=1, spaceAfter=20)
                 body_style = ParagraphStyle('Normal', fontSize=12, spaceAfter=10)
-                
                 parts.append(Paragraph("<b>MediVista Hospital Revenue Report</b>", title_style))
                 parts.append(Paragraph(f"<b>Date Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style))
                 parts.append(Spacer(1, 0.2 * inch))
                 parts.append(Paragraph(f"<b>Total Gross Revenue:</b> ₹{report_df['amount_paid'].sum():,.2f}", body_style))
-                
                 doc_pdf.build(parts)
                 with open(fn, "rb") as f:
                     st.download_button("Download PDF", f, file_name=fn)
