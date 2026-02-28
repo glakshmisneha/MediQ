@@ -9,11 +9,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
-import os
-
-# ================= DATABASE ================= #
 
 DB_NAME = "mediq.db"
+
+# ================= DATABASE ================= #
 
 def connect_db():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -22,22 +21,42 @@ def init_db():
     conn = connect_db()
     c = conn.cursor()
 
-    # Create users table if not exists (without assuming role column)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users(
-        email TEXT PRIMARY KEY,
-        password BLOB
-    )
-    """)
+    # Check if users table exists
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    table_exists = c.fetchone()
 
-    # Check if 'role' column exists
-    c.execute("PRAGMA table_info(users)")
-    columns = [col[1] for col in c.fetchall()]
+    if not table_exists:
+        c.execute("""
+        CREATE TABLE users(
+            email TEXT PRIMARY KEY,
+            password BLOB,
+            role TEXT
+        )
+        """)
+    else:
+        # Check columns
+        c.execute("PRAGMA table_info(users)")
+        columns = [col[1] for col in c.fetchall()]
 
-    if "role" not in columns:
-        c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Receptionist'")
+        if "role" not in columns:
+            # Create new table with correct schema
+            c.execute("""
+            CREATE TABLE users_new(
+                email TEXT PRIMARY KEY,
+                password BLOB,
+                role TEXT DEFAULT 'Receptionist'
+            )
+            """)
 
-    # Doctors table
+            c.execute("""
+            INSERT INTO users_new (email, password)
+            SELECT email, password FROM users
+            """)
+
+            c.execute("DROP TABLE users")
+            c.execute("ALTER TABLE users_new RENAME TO users")
+
+    # Doctors
     c.execute("""
     CREATE TABLE IF NOT EXISTS doctors(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +67,7 @@ def init_db():
     )
     """)
 
-    # Patients table
+    # Patients
     c.execute("""
     CREATE TABLE IF NOT EXISTS patients(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +80,7 @@ def init_db():
     )
     """)
 
-    # Appointments table
+    # Appointments
     c.execute("""
     CREATE TABLE IF NOT EXISTS appointments(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,8 +142,10 @@ if not st.session_state.logged_in:
             else:
                 hashed = hash_password(password)
                 try:
-                    c.execute("INSERT INTO users (email,password,role) VALUES (?,?,?)",
-                              (email, sqlite3.Binary(hashed), role))
+                    c.execute(
+                        "INSERT INTO users (email,password,role) VALUES (?,?,?)",
+                        (email, sqlite3.Binary(hashed), role)
+                    )
                     conn.commit()
                     st.success("Account Created Successfully")
                 except:
@@ -142,9 +163,9 @@ if not st.session_state.logged_in:
                     st.session_state.role = role
                     st.rerun()
                 else:
-                    st.error("Invalid Credentials")
+                    st.error("Invalid credentials")
             else:
-                st.error("User Not Found")
+                st.error("User not found")
 
     conn.close()
 
@@ -168,7 +189,7 @@ else:
     conn = connect_db()
     c = conn.cursor()
 
-    # ---------------- DASHBOARD ---------------- #
+    # -------- DASHBOARD -------- #
 
     if page == "Dashboard":
 
@@ -185,7 +206,7 @@ else:
                          title="Doctor Availability")
             st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------- DOCTORS ---------------- #
+    # -------- DOCTORS -------- #
 
     elif page == "Doctors":
 
@@ -204,17 +225,9 @@ else:
 
         st.subheader("Doctor List")
         doctors = pd.read_sql_query("SELECT * FROM doctors", conn)
+        st.dataframe(doctors)
 
-        for _, row in doctors.iterrows():
-            st.write(f"**{row['name']}** - {row['specialty']}")
-
-            if st.session_state.role == "Admin":
-                if st.button(f"Delete Doctor {row['id']}"):
-                    c.execute("DELETE FROM doctors WHERE id=?", (row["id"],))
-                    conn.commit()
-                    st.rerun()
-
-    # ---------------- PATIENTS ---------------- #
+    # -------- PATIENTS -------- #
 
     elif page == "Patients":
 
@@ -236,10 +249,9 @@ else:
             st.success("Patient Added")
             st.rerun()
 
-        patients = pd.read_sql_query("SELECT * FROM patients", conn)
-        st.dataframe(patients)
+        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn))
 
-    # ---------------- APPOINTMENTS ---------------- #
+    # -------- APPOINTMENTS -------- #
 
     elif page == "Appointments":
 
@@ -259,8 +271,10 @@ else:
 
                     pid = patients[patients["name"] == patient]["id"].iloc[0]
 
-                    c.execute("INSERT INTO appointments (patient_id,doctor_id,appointment_date) VALUES (?,?,?)",
-                              (pid, doc["id"], datetime.now().strftime("%Y-%m-%d")))
+                    c.execute(
+                        "INSERT INTO appointments (patient_id,doctor_id,appointment_date) VALUES (?,?,?)",
+                        (pid, doc["id"], datetime.now().strftime("%Y-%m-%d"))
+                    )
 
                     c.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?",
                               (doc["id"],))
@@ -271,7 +285,7 @@ else:
                 else:
                     st.error("No Slots Available")
 
-    # ---------------- REPORTS ---------------- #
+    # -------- REPORTS -------- #
 
     elif page == "Reports":
 
