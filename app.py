@@ -21,11 +21,9 @@ def init_db():
     conn = connect_db()
     c = conn.cursor()
 
-    # Check if users table exists
+    # Check/Create Users table
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    table_exists = c.fetchone()
-
-    if not table_exists:
+    if not c.fetchone():
         c.execute("""
         CREATE TABLE users(
             email TEXT PRIMARY KEY,
@@ -34,14 +32,13 @@ def init_db():
         )
         """)
     else:
+        # Schema migration check for 'role' column
         c.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in c.fetchall()]
         if "role" not in columns:
-            c.execute("CREATE TABLE users_new(email TEXT PRIMARY KEY, password BLOB, role TEXT DEFAULT 'Receptionist')")
-            c.execute("INSERT INTO users_new (email, password) SELECT email, password FROM users")
-            c.execute("DROP TABLE users")
-            c.execute("ALTER TABLE users_new RENAME TO users")
+            c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Receptionist'")
 
+    # Create other tables
     c.execute("CREATE TABLE IF NOT EXISTS doctors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, specialty TEXT, total_slots INTEGER, booked_slots INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, blood_group TEXT, reason TEXT, amount_paid REAL, visit_date TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS appointments(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, doctor_id INTEGER, appointment_date TEXT)")
@@ -57,12 +54,18 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    # Fix: Ensure hashed is bytes. SQLite 'BLOB' can return bytes or memoryview.
-    if isinstance(hashed, memoryview):
-        hashed = hashed.tobytes()
-    elif isinstance(hashed, str):
+    """
+    Validates password against hash. 
+    Handles cases where SQLite returns bytes, memoryview, or strings.
+    """
+    if isinstance(hashed, str):
+        # Convert string back to bytes if database stored it as text
         hashed = hashed.encode('utf-8')
+    elif isinstance(hashed, memoryview):
+        # Convert memoryview (common in SQLite BLOBs) to bytes
+        hashed = hashed.tobytes()
     
+    # Bcrypt requires both arguments to be bytes
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
 def strong_password(password):
@@ -90,29 +93,34 @@ if not st.session_state.logged_in:
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
 
-    conn = connect_db()
-    c = conn.cursor()
-
     if mode == "Register":
         role = st.selectbox("Select Role", ["Admin", "Receptionist"])
         if st.button("Create Account"):
             if not strong_password(password):
                 st.error("Password must contain uppercase, lowercase & number (min 8 chars)")
             else:
+                conn = connect_db()
+                c = conn.cursor()
                 hashed = hash_password(password)
                 try:
-                    # Using sqlite3.Binary ensures the hashed bytes are stored correctly as BLOB
-                    c.execute("INSERT INTO users (email,password,role) VALUES (?,?,?)",
+                    # sqlite3.Binary ensures bytes are stored as a BLOB
+                    c.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)",
                              (email, sqlite3.Binary(hashed), role))
                     conn.commit()
-                    st.success("Account Created Successfully! Please switch to Login.")
+                    st.success("Account Created! You can now Login.")
                 except sqlite3.IntegrityError:
                     st.error("User already exists")
+                finally:
+                    conn.close()
 
     if mode == "Login":
         if st.button("Login"):
+            conn = connect_db()
+            c = conn.cursor()
             c.execute("SELECT password, role FROM users WHERE email=?", (email,))
             result = c.fetchone()
+            conn.close()
+
             if result:
                 stored_password, role = result
                 try:
@@ -126,11 +134,9 @@ if not st.session_state.logged_in:
                     st.error(f"Authentication Error: {e}")
             else:
                 st.error("User not found")
-    conn.close()
 
 # ================= MAIN APP ================= #
 else:
-    # Sidebar & Logic remains the same...
     st.sidebar.title("MediQ Panel")
     st.sidebar.write(f"Logged in as: **{st.session_state.role}**")
     
@@ -157,64 +163,76 @@ else:
 
     elif page == "Doctors":
         if st.session_state.role == "Admin":
-            st.subheader("Add Doctor")
+            st.subheader("Add New Doctor")
             d_name = st.text_input("Doctor Name")
             spec = st.text_input("Specialty")
             slots = st.number_input("Total Slots", 1, 100)
             if st.button("Add Doctor"):
-                c.execute("INSERT INTO doctors (name,specialty,total_slots) VALUES (?,?,?)", (d_name, spec, slots))
+                c.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (d_name, spec, slots))
                 conn.commit()
                 st.success("Doctor Added")
                 st.rerun()
-        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn))
+        
+        st.subheader("Doctor Directory")
+        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), use_container_width=True)
 
     elif page == "Patients":
-        st.subheader("Add Patient")
+        st.subheader("Register Patient")
         p_name = st.text_input("Patient Name")
         age = st.number_input("Age", 0, 120)
         blood = st.text_input("Blood Group")
-        reason = st.text_input("Reason")
-        payment = st.number_input("Payment", 0.0)
+        reason = st.text_input("Reason for Visit")
+        payment = st.number_input("Payment Received", 0.0)
         if st.button("Add Patient"):
-            c.execute("INSERT INTO patients (name,age,blood_group,reason,amount_paid,visit_date) VALUES (?,?,?,?,?,?)",
+            c.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
                      (p_name, age, blood, reason, payment, datetime.now().strftime("%Y-%m-%d")))
             conn.commit()
-            st.success("Patient Added")
+            st.success("Patient Record Created")
             st.rerun()
-        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn))
+        
+        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), use_container_width=True)
 
     elif page == "Appointments":
-        patients_df = pd.read_sql_query("SELECT id,name FROM patients", conn)
-        doctors_df = pd.read_sql_query("SELECT * FROM doctors", conn)
+        patients_df = pd.read_sql_query("SELECT id, name FROM patients", conn)
+        doctors_df = pd.read_sql_query("SELECT id, name, total_slots, booked_slots FROM doctors", conn)
+        
         if not patients_df.empty and not doctors_df.empty:
-            p_choice = st.selectbox("Patient", patients_df["name"])
-            d_choice = st.selectbox("Doctor", doctors_df["name"])
+            p_choice = st.selectbox("Select Patient", patients_df["name"])
+            d_choice = st.selectbox("Select Doctor", doctors_df["name"])
+            
             if st.button("Book Appointment"):
                 doc = doctors_df[doctors_df["name"] == d_choice].iloc[0]
                 if doc["booked_slots"] < doc["total_slots"]:
                     pid = patients_df[patients_df["name"] == p_choice]["id"].iloc[0]
-                    c.execute("INSERT INTO appointments (patient_id,doctor_id,appointment_date) VALUES (?,?,?)",
-                             (pid, doc["id"], datetime.now().strftime("%Y-%m-%d")))
+                    c.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)",
+                             (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
                     c.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
                     conn.commit()
-                    st.success("Appointment Booked")
+                    st.success(f"Appointment confirmed with {d_choice}")
                     st.rerun()
                 else:
-                    st.error("No Slots Available")
+                    st.error("No Slots Available for this doctor.")
+        else:
+            st.warning("Ensure both Doctors and Patients are registered before booking.")
 
     elif page == "Reports":
-        if st.button("Generate Revenue PDF"):
-            patients_df = pd.read_sql_query("SELECT * FROM patients", conn)
-            total = patients_df["amount_paid"].sum()
-            file_name = "MediQ_Report.pdf"
+        st.subheader("Revenue & Statistics")
+        patients_df = pd.read_sql_query("SELECT * FROM patients", conn)
+        total = patients_df["amount_paid"].sum()
+        st.write(f"### Total Revenue Generated: ₹{total}")
+
+        if st.button("Export Revenue Report (PDF)"):
+            file_name = "MediQ_Revenue_Report.pdf"
             doc_pdf = SimpleDocTemplate(file_name, pagesize=A4)
             elements = []
             style = ParagraphStyle(name='Normal', fontSize=12)
-            elements.append(Paragraph("MediQ Revenue Report", style))
+            elements.append(Paragraph("MediQ Hospital Revenue Report", style))
             elements.append(Spacer(1, 0.5 * inch))
+            elements.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", style))
             elements.append(Paragraph(f"Total Revenue: ₹{total}", style))
             doc_pdf.build(elements)
+            
             with open(file_name, "rb") as f:
-                st.download_button("Download Report", f, file_name=file_name)
+                st.download_button("Download PDF", f, file_name=file_name)
     
     conn.close()
