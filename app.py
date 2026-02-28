@@ -11,7 +11,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 
-# 1. MUST BE THE FIRST STREAMLIT COMMAND
+# 1. MUST BE THE VERY FIRST STREAMLIT COMMAND
 st.set_page_config(page_title="MediVista Admin", layout="wide")
 
 DB_NAME = "mediq.db"
@@ -50,7 +50,7 @@ def check_password(password, hashed):
         # Verify the hash
         return bcrypt.checkpw(password.encode('utf-8'), hashed)
     except Exception:
-        # Returns False if salt is invalid or hash is corrupted
+        # Catch "Invalid salt" errors without crashing the app
         return False
 
 # ================= STYLING ================= #
@@ -84,7 +84,7 @@ if not st.session_state.logged_in:
                 conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", 
                              (email, sqlite3.Binary(hashed), role))
                 conn.commit()
-                st.success("Account Created! Switch to Login.")
+                st.success("Account Created! You can now switch to Login.")
             except: st.error("User already exists")
             conn.close()
 
@@ -92,19 +92,19 @@ if not st.session_state.logged_in:
         if st.button("Login"):
             conn = connect_db()
             res = conn.execute("SELECT password, role FROM users WHERE email=?", (email,)).fetchone()
-            conn.close() # Close immediately after fetch
+            conn.close()
             
             if res and check_password(password, res[0]):
                 st.session_state.logged_in = True
                 st.session_state.role = res[1]
                 st.rerun()
             else: 
-                st.error("Invalid Credentials or Corrupted Account Data")
+                st.error("Invalid Credentials or Corrupted Account (Invalid Salt)")
 
 # ================= MAIN APP ================= #
 else:
     st.sidebar.title("MediVista Admin")
-    st.sidebar.write(f"Access: **{st.session_state.role}**")
+    st.sidebar.write(f"Logged in as: **{st.session_state.role}**")
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports", "Settings"])
 
     if st.sidebar.button("Quick Logout"):
@@ -140,6 +140,7 @@ else:
             c1, c2 = st.columns(2)
             name = c1.text_input("Name")
             age = c2.number_input("Age", 0)
+            # Selection box for consistency
             blood = c1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
             reason = c2.text_input("Reason")
             pay = c1.number_input("Payment", 0.0)
@@ -172,7 +173,7 @@ else:
         st.write("### Recent Appointment History")
         history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history_df.empty:
-            # FIX: Ensure IDs are strings for Streamlit display
+            # FIX: Convert IDs to strings to prevent Arrow Serialization Error
             history_df['patient_id'] = history_df['patient_id'].astype(str)
             history_df['doctor_id'] = history_df['doctor_id'].astype(str)
             st.dataframe(history_df, width='stretch')
@@ -185,7 +186,7 @@ else:
             st.subheader("Report Content Preview")
             st.dataframe(report_df, width='stretch')
             if st.button("Generate & Download PDF"):
-                fn = f"Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+                fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc = SimpleDocTemplate(fn, pagesize=A4)
                 parts = [Paragraph("<b>MediVista Revenue Report</b>", ParagraphStyle('Title', fontSize=18, alignment=1)),
                          Spacer(1, 0.2 * inch),
@@ -195,26 +196,28 @@ else:
                     st.download_button("Download Now", f, file_name=fn)
         else: st.warning("No records found.")
 
-    # -------- SETTINGS -------- #
+    # -------- SETTINGS (CLEANER) -------- #
     elif page == "Settings":
-        st.title("Admin Settings")
+        st.title("System Settings")
         if st.session_state.role == "Admin":
-            st.error("Clearing data will wipe all patient and appointment history.")
-            if st.button("Clear All System Data"):
+            st.subheader("Database Maintenance")
+            st.warning("Warning: Clearing data will wipe all patient and appointment records.")
+            if st.button("Clear All Data"):
                 c = conn.cursor()
                 c.execute("DELETE FROM patients")
                 c.execute("DELETE FROM doctors")
                 c.execute("DELETE FROM appointments")
                 conn.commit()
-                st.success("System Reset Complete.")
+                st.success("Database Reset Complete.")
                 st.rerun()
-        else: st.info("Settings restricted to Admin.")
+        else:
+            st.info("Settings are restricted to Admin users.")
 
-    # Footer Logout
+    # Bottom Logout Section
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown('<div class="logout-footer">', unsafe_allow_html=True)
     st.markdown("---")
-    if st.button("Logout System"):
+    if st.button("Logout Session"):
         st.session_state.logged_in = False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
