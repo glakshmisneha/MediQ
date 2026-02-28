@@ -21,7 +21,6 @@ def init_db():
     conn = connect_db()
     c = conn.cursor()
 
-    # Check/Create Users table
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
     if not c.fetchone():
         c.execute("""
@@ -32,13 +31,11 @@ def init_db():
         )
         """)
     else:
-        # Schema migration check for 'role' column
         c.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in c.fetchall()]
         if "role" not in columns:
             c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Receptionist'")
 
-    # Create other tables
     c.execute("CREATE TABLE IF NOT EXISTS doctors(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, specialty TEXT, total_slots INTEGER, booked_slots INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, blood_group TEXT, reason TEXT, amount_paid REAL, visit_date TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS appointments(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, doctor_id INTEGER, appointment_date TEXT)")
@@ -54,18 +51,10 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    """
-    Validates password against hash. 
-    Handles cases where SQLite returns bytes, memoryview, or strings.
-    """
     if isinstance(hashed, str):
-        # Convert string back to bytes if database stored it as text
         hashed = hashed.encode('utf-8')
     elif isinstance(hashed, memoryview):
-        # Convert memoryview (common in SQLite BLOBs) to bytes
         hashed = hashed.tobytes()
-    
-    # Bcrypt requires both arguments to be bytes
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
 def strong_password(password):
@@ -103,7 +92,6 @@ if not st.session_state.logged_in:
                 c = conn.cursor()
                 hashed = hash_password(password)
                 try:
-                    # sqlite3.Binary ensures bytes are stored as a BLOB
                     c.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)",
                              (email, sqlite3.Binary(hashed), role))
                     conn.commit()
@@ -159,7 +147,8 @@ else:
         if not doctors_df.empty:
             doctors_df["Available Slots"] = doctors_df["total_slots"] - doctors_df["booked_slots"]
             fig = px.bar(doctors_df, x="name", y="Available Slots", title="Doctor Availability")
-            st.plotly_chart(fig, use_container_width=True)
+            # FIX: Updated to width='stretch'
+            st.plotly_chart(fig, width='stretch')
 
     elif page == "Doctors":
         if st.session_state.role == "Admin":
@@ -174,7 +163,8 @@ else:
                 st.rerun()
         
         st.subheader("Doctor Directory")
-        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), use_container_width=True)
+        # FIX: Updated to width='stretch'
+        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), width='stretch')
 
     elif page == "Patients":
         st.subheader("Register Patient")
@@ -190,7 +180,8 @@ else:
             st.success("Patient Record Created")
             st.rerun()
         
-        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), use_container_width=True)
+        # FIX: Updated to width='stretch'
+        st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), width='stretch')
 
     elif page == "Appointments":
         patients_df = pd.read_sql_query("SELECT id, name FROM patients", conn)
