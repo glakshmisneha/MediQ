@@ -11,6 +11,9 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 
+# 1. MUST BE THE FIRST STREAMLIT COMMAND
+st.set_page_config(page_title="MediVista Admin", layout="wide")
+
 DB_NAME = "mediq.db"
 
 # ================= DATABASE ================= #
@@ -36,23 +39,27 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    # DEBUG FIX: Explicitly handle cases where SQLite returns strings or memoryviews
-    # bcrypt.checkpw MUST receive bytes
-    if isinstance(hashed, str):
-        hashed = hashed.encode('utf-8')
-    elif isinstance(hashed, memoryview):
-        hashed = hashed.tobytes()
-    return bcrypt.checkpw(password.encode('utf-8'), hashed)
+    """Verifies password against a stored hash with safety checks."""
+    try:
+        # Convert stored data to bytes if necessary
+        if isinstance(hashed, str):
+            hashed = hashed.encode('utf-8')
+        elif isinstance(hashed, memoryview):
+            hashed = hashed.tobytes()
+        
+        # Verify the hash
+        return bcrypt.checkpw(password.encode('utf-8'), hashed)
+    except Exception:
+        # Returns False if salt is invalid or hash is corrupted
+        return False
 
-# ================= CONFIG ================= #
-
-st.set_page_config(page_title="MediVista Admin", layout="wide")
+# ================= STYLING ================= #
 
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; width: 100%; }
-    .logout-btn-bottom>button { background-color: #ff4b4b !important; color: white !important; }
+    .logout-footer { padding-top: 50px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -73,32 +80,34 @@ if not st.session_state.logged_in:
             hashed = hash_password(password)
             conn = connect_db()
             try:
-                # Use sqlite3.Binary to ensure bytes are stored correctly
+                # Store as Binary to ensure correct BLOB format
                 conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", 
                              (email, sqlite3.Binary(hashed), role))
                 conn.commit()
-                st.success("Account Created!")
-            except: st.error("User exists")
+                st.success("Account Created! Switch to Login.")
+            except: st.error("User already exists")
             conn.close()
 
     if mode == "Login":
         if st.button("Login"):
             conn = connect_db()
             res = conn.execute("SELECT password, role FROM users WHERE email=?", (email,)).fetchone()
+            conn.close() # Close immediately after fetch
+            
             if res and check_password(password, res[0]):
                 st.session_state.logged_in = True
                 st.session_state.role = res[1]
                 st.rerun()
-            else: st.error("Invalid Credentials")
-            conn.close()
+            else: 
+                st.error("Invalid Credentials or Corrupted Account Data")
 
 # ================= MAIN APP ================= #
 else:
     st.sidebar.title("MediVista Admin")
-    st.sidebar.write(f"Logged in as: **{st.session_state.role}**")
+    st.sidebar.write(f"Access: **{st.session_state.role}**")
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports", "Settings"])
 
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("Quick Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
@@ -115,29 +124,14 @@ else:
         m2.metric("Total Revenue", f"₹ {patients['amount_paid'].sum() if not patients.empty else 0.0}")
         m3.metric("Total Appointments", len(apps))
 
-        st.divider()
-
         if not patients.empty:
+            st.divider()
             st.write("### Visits by Reason")
             reasons = patients['reason'].value_counts().reset_index()
             reasons.columns = ['reason', 'count']
             fig_r = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
             fig_r.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_r, width='stretch')
-
-    # -------- DOCTORS -------- #
-    elif page == "Doctors Allotment":
-        st.title("Doctors Allotment")
-        if st.session_state.role == "Admin":
-            with st.expander("Add New Doctor"):
-                n = st.text_input("Name")
-                s = st.text_input("Specialty")
-                sl = st.number_input("Slots", 1)
-                if st.button("Save Doctor"):
-                    conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
-                    conn.commit()
-                    st.rerun()
-        st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), width='stretch')
 
     # -------- PATIENTS -------- #
     elif page == "Patient Details":
@@ -146,7 +140,6 @@ else:
             c1, c2 = st.columns(2)
             name = c1.text_input("Name")
             age = c2.number_input("Age", 0)
-            # Standardized Blood Group Selection
             blood = c1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
             reason = c2.text_input("Reason")
             pay = c1.number_input("Payment", 0.0)
@@ -166,7 +159,6 @@ else:
         if not p_df.empty and not d_df.empty:
             p_sel = st.selectbox("Select Patient", p_df["name"])
             d_sel = st.selectbox("Select Doctor", d_df["name"])
-            
             if st.button("Confirm Appointment"):
                 doc = d_df[d_df["name"] == d_sel].iloc[0]
                 if doc["booked_slots"] < doc["total_slots"]:
@@ -180,55 +172,49 @@ else:
         st.write("### Recent Appointment History")
         history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
         if not history_df.empty:
-            # FIX: Convert IDs to strings to prevent Arrow Serialization Error
+            # FIX: Ensure IDs are strings for Streamlit display
             history_df['patient_id'] = history_df['patient_id'].astype(str)
             history_df['doctor_id'] = history_df['doctor_id'].astype(str)
             st.dataframe(history_df, width='stretch')
 
     # -------- REPORTS -------- #
     elif page == "Reports":
-        st.title("Hospital Reports")
+        st.title("Hospital Analytics")
         report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
-        
         if not report_df.empty:
-            # Live content preview before downloading
             st.subheader("Report Content Preview")
-            c1, c2 = st.columns(2)
-            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum():,.2f}")
-            c2.metric("Total Records", len(report_df))
             st.dataframe(report_df, width='stretch')
-
-            if st.button("Generate Revenue Report (PDF)"):
-                fn = f"MediVista_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+            if st.button("Generate & Download PDF"):
+                fn = f"Report_{datetime.now().strftime('%Y%m%d')}.pdf"
                 doc = SimpleDocTemplate(fn, pagesize=A4)
-                parts = [Paragraph("<b>MediVista Hospital Revenue Report</b>", ParagraphStyle('Title', fontSize=18, spaceAfter=20, alignment=1)),
-                         Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')}", ParagraphStyle('Body', fontSize=12)),
+                parts = [Paragraph("<b>MediVista Revenue Report</b>", ParagraphStyle('Title', fontSize=18, alignment=1)),
+                         Spacer(1, 0.2 * inch),
                          Paragraph(f"Total Revenue: ₹{report_df['amount_paid'].sum():,.2f}", ParagraphStyle('Body', fontSize=12))]
                 doc.build(parts)
                 with open(fn, "rb") as f:
-                    st.download_button("Download Report", f, file_name=fn)
+                    st.download_button("Download Now", f, file_name=fn)
         else: st.warning("No records found.")
 
     # -------- SETTINGS -------- #
     elif page == "Settings":
-        st.title("System Settings")
+        st.title("Admin Settings")
         if st.session_state.role == "Admin":
-            st.error("DANGER ZONE: This will permanently delete patient and appointment history.")
-            if st.button("Clear All Data"):
+            st.error("Clearing data will wipe all patient and appointment history.")
+            if st.button("Clear All System Data"):
                 c = conn.cursor()
                 c.execute("DELETE FROM patients")
                 c.execute("DELETE FROM doctors")
                 c.execute("DELETE FROM appointments")
                 conn.commit()
-                st.success("Database cleared!")
+                st.success("System Reset Complete.")
                 st.rerun()
-        else:
-            st.info("Settings are restricted to Admin users.")
+        else: st.info("Settings restricted to Admin.")
 
-    # BOTTOM LOGOUT BUTTON
+    # Footer Logout
     st.markdown("<br><br>", unsafe_allow_html=True)
-    st.markdown('<div class="logout-btn-bottom">', unsafe_allow_html=True)
-    if st.button("Logout Session"):
+    st.markdown('<div class="logout-footer">', unsafe_allow_html=True)
+    st.markdown("---")
+    if st.button("Logout System"):
         st.session_state.logged_in = False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
