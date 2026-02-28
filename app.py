@@ -31,7 +31,11 @@ init_db()
 
 # ================= SECURITY ================= #
 
+def hash_password(password):
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+
 def check_password(password, hashed):
+    # Fix for "PyBytes" error by handling string/memoryview conversion
     if isinstance(hashed, str): hashed = hashed.encode('utf-8')
     elif isinstance(hashed, memoryview): hashed = hashed.tobytes()
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
@@ -40,12 +44,12 @@ def check_password(password, hashed):
 
 st.set_page_config(page_title="MediVista Admin", layout="wide")
 
-# Custom CSS for the MediVista look
+# Custom CSS for UI matching your screenshots
 st.markdown("""
     <style>
-    div[data-testid="stMetricValue"] { color: #ffffff; font-size: 36px; font-weight: bold; }
-    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; }
-    .stDataFrame { border: 1px solid #333; }
+    div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
+    .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
+    .stSidebar { background-color: #0e1117; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -55,28 +59,37 @@ if "logged_in" not in st.session_state:
 # ================= AUTH ================= #
 
 if not st.session_state.logged_in:
-    st.title("🏥 MediVista Admin Login")
-    # Simplified login for demonstration; use your full registration/login logic here
+    st.title("🏥 MediVista Login")
+    mode = st.radio("Option", ["Login", "Register"], horizontal=True)
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        conn = connect_db()
-        c = conn.cursor()
-        c.execute("SELECT password, role FROM users WHERE email=?", (email,))
-        result = c.fetchone()
-        if result and check_password(password, result[0]):
-            st.session_state.logged_in = True
-            st.session_state.role = result[1]
-            st.rerun()
-        else:
-            st.error("Invalid Credentials")
-        conn.close()
+
+    if mode == "Register":
+        role = st.selectbox("Role", ["Admin", "Receptionist"])
+        if st.button("Create Account"):
+            hashed = hash_password(password)
+            conn = connect_db()
+            try:
+                conn.execute("INSERT INTO users (email, password, role) VALUES (?,?,?)", (email, sqlite3.Binary(hashed), role))
+                conn.commit()
+                st.success("Account Created!")
+            except: st.error("User exists")
+            conn.close()
+
+    if mode == "Login":
+        if st.button("Login"):
+            conn = connect_db()
+            res = conn.execute("SELECT password, role FROM users WHERE email=?", (email,)).fetchone()
+            if res and check_password(password, res[0]):
+                st.session_state.logged_in = True
+                st.session_state.role = res[1]
+                st.rerun()
+            else: st.error("Invalid Credentials")
+            conn.close()
 
 # ================= MAIN APP ================= #
 else:
     st.sidebar.title("MediVista Admin")
-    st.sidebar.write(f"Logged in as: **{st.session_state.get('role', 'Admin')}**")
-    
     page = st.sidebar.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Appointments", "Reports"])
 
     if st.sidebar.button("Logout"):
@@ -88,129 +101,103 @@ else:
     # -------- DASHBOARD -------- #
     if page == "Dashboard":
         st.title("Hospital Dashboard")
+        patients = pd.read_sql_query("SELECT * FROM patients", conn)
+        apps = pd.read_sql_query("SELECT * FROM appointments", conn)
         
-        patients_df = pd.read_sql_query("SELECT * FROM patients", conn)
-        appointments_df = pd.read_sql_query("SELECT * FROM appointments", conn)
-        total_rev = patients_df["amount_paid"].sum() if not patients_df.empty else 0.0
-
-        # Metrics Row (Matching Screenshot 1)
+        # Metrics Row (Matching Screenshot)
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total Visits", len(patients_df))
-        m2.metric("Total Revenue", f"₹ {total_rev}")
-        m3.metric("Total Appointments", len(appointments_df))
+        m1.metric("Total Visits", len(patients))
+        m2.metric("Total Revenue", f"₹ {patients['amount_paid'].sum() if not patients.empty else 0.0}")
+        m3.metric("Total Appointments", len(apps))
 
         st.divider()
 
-        # Visits by Reason Chart (Matching Screenshot 1)
-        if not patients_df.empty:
-            st.subheader("Visits by Reason")
-            reason_counts = patients_df['reason'].value_counts().reset_index()
-            reason_counts.columns = ['reason', 'count']
-            fig_reason = px.bar(reason_counts, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-            fig_reason.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_reason, width='stretch')
-
-        # Workload Distribution (Matching Screenshot 2)
-        st.subheader("Doctor Workload Distribution")
-        doctors_df = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
-        if not doctors_df.empty:
-            fig_work = px.bar(doctors_df, x='name', y='booked_slots', color_discrete_sequence=['#1f77b4'])
-            fig_work.update_layout(template="plotly_dark")
-            st.plotly_chart(fig_work, width='stretch')
+        # Visits by Reason Chart (Matching Screenshot)
+        if not patients.empty:
+            st.write("### Visits by Reason")
+            reasons = patients['reason'].value_counts().reset_index()
+            reasons.columns = ['reason', 'count']
+            fig_r = px.bar(reasons, x='reason', y='count', color_discrete_sequence=['#87CEFA'])
+            fig_r.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_r, width='stretch')
 
     # -------- DOCTORS -------- #
     elif page == "Doctors Allotment":
         st.title("Doctors Allotment")
-        if st.session_state.get('role') == "Admin":
-            with st.expander("Add New Doctor"):
-                d_name = st.text_input("Name")
-                d_spec = st.text_input("Specialty")
-                d_slots = st.number_input("Total Slots", 1, 100)
-                if st.button("Save Doctor"):
-                    c = conn.cursor()
-                    c.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (d_name, d_spec, d_slots))
+        if st.session_state.role == "Admin":
+            with st.expander("Add Doctor"):
+                n = st.text_input("Name")
+                s = st.text_input("Specialty")
+                sl = st.number_input("Slots", 1)
+                if st.button("Add"):
+                    conn.execute("INSERT INTO doctors (name, specialty, total_slots) VALUES (?,?,?)", (n, s, sl))
                     conn.commit()
-                    st.success("Doctor Added")
                     st.rerun()
-        
         st.dataframe(pd.read_sql_query("SELECT * FROM doctors", conn), width='stretch')
 
     # -------- PATIENTS -------- #
     elif page == "Patient Details":
         st.title("Patient Details")
-        with st.form("patient_form"):
-            col1, col2 = st.columns(2)
-            p_name = col1.text_input("Name")
-            p_age = col2.number_input("Age", 0, 120)
-            
-            # CHANGE: Selectbox for Blood Group
-            p_blood = col1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
-            p_reason = col2.text_input("Reason")
-            p_payment = col1.number_input("Amount Paid", 0.0)
-            
-            if st.form_submit_button("Add Patient"):
-                c = conn.cursor()
-                c.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
-                         (p_name, p_age, p_blood, p_reason, p_payment, datetime.now().strftime("%Y-%m-%d")))
+        with st.form("p_form"):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Name")
+            age = c2.number_input("Age", 0)
+            # CHANGE: Selection for Blood Group
+            blood = c1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
+            reason = c2.text_input("Reason")
+            pay = c1.number_input("Payment", 0.0)
+            if st.form_submit_button("Register"):
+                conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)",
+                            (name, age, blood, reason, pay, datetime.now().strftime("%Y-%m-%d")))
                 conn.commit()
-                st.success("Patient Registered")
                 st.rerun()
-        
         st.dataframe(pd.read_sql_query("SELECT * FROM patients", conn), width='stretch')
 
     # -------- APPOINTMENTS -------- #
     elif page == "Appointments":
         st.title("Appointment Booking")
+        p_df = pd.read_sql_query("SELECT id, name FROM patients", conn)
+        d_df = pd.read_sql_query("SELECT id, name, total_slots, booked_slots FROM doctors", conn)
         
-        patients_df = pd.read_sql_query("SELECT id, name FROM patients", conn)
-        doctors_df = pd.read_sql_query("SELECT id, name, total_slots, booked_slots FROM doctors", conn)
-        
-        # Booking Logic
-        p_choice = st.selectbox("Select Patient", patients_df["name"]) if not patients_df.empty else None
-        d_choice = st.selectbox("Select Doctor", doctors_df["name"]) if not doctors_df.empty else None
+        p_sel = st.selectbox("Select Patient", p_df["name"]) if not p_df.empty else None
+        d_sel = st.selectbox("Select Doctor", d_df["name"]) if not d_df.empty else None
         
         if st.button("Book Appointment"):
-            if p_choice and d_choice:
-                doc = doctors_df[doctors_df["name"] == d_choice].iloc[0]
-                if doc["booked_slots"] < doc["total_slots"]:
-                    pid = patients_df[patients_df["name"] == p_choice]["id"].iloc[0]
-                    c = conn.cursor()
-                    c.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)",
-                             (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
-                    c.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
-                    conn.commit()
-                    st.success("Booking Successful")
-                    st.rerun()
-                else:
-                    st.error("No Slots Available")
+            doc = d_df[d_df["name"] == d_sel].iloc[0]
+            if doc["booked_slots"] < doc["total_slots"]:
+                pid = p_df[p_df["name"] == p_sel]["id"].iloc[0]
+                conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date) VALUES (?,?,?)",
+                            (int(pid), int(doc["id"]), datetime.now().strftime("%Y-%m-%d")))
+                conn.execute("UPDATE doctors SET booked_slots = booked_slots + 1 WHERE id=?", (int(doc["id"]),))
+                conn.commit()
+                st.success("Booked!")
+                st.rerun()
 
-        # Table showing current appointments (Matching Screenshot 3)
-        st.subheader("Appointment List")
-        history_df = pd.read_sql_query("SELECT * FROM appointments", conn)
-        st.dataframe(history_df, width='stretch')
+        # Appointment Table (Matching Screenshot)
+        st.write("### Recent Appointments")
+        st.dataframe(pd.read_sql_query("SELECT * FROM appointments", conn), width='stretch')
 
     # -------- REPORTS -------- #
     elif page == "Reports":
-        st.title("Generate Reports")
-        if st.button("Generate Revenue PDF Report"):
-            patients_df = pd.read_sql_query("SELECT * FROM patients", conn)
-            total = patients_df["amount_paid"].sum()
-            file_name = "MediVista_Revenue_Report.pdf"
-            
-            doc_pdf = SimpleDocTemplate(file_name, pagesize=A4)
-            elements = []
-            style = ParagraphStyle(name='Normal', fontSize=12, textColor='#000000')
-            header_style = ParagraphStyle(name='Header', fontSize=18, spaceAfter=20)
+        st.title("Hospital Reports")
+        report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
+        
+        if not report_df.empty:
+            # PREVIEW BEFORE DOWNLOAD
+            st.subheader("Report Content Preview")
+            c1, c2 = st.columns(2)
+            c1.metric("Total Revenue", f"₹ {report_df['amount_paid'].sum()}")
+            c2.metric("Total Records", len(report_df))
+            st.dataframe(report_df, width='stretch')
 
-            elements.append(Paragraph("MediVista Hospital Revenue Report", header_style))
-            elements.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')}", style))
-            elements.append(Spacer(1, 0.2 * inch))
-            elements.append(Paragraph(f"Total Patients: {len(patients_df)}", style))
-            elements.append(Paragraph(f"Total Revenue Collected: ₹{total}", style))
-            
-            doc_pdf.build(elements)
-            
-            with open(file_name, "rb") as f:
-                st.download_button("Download PDF", f, file_name=file_name)
+            if st.button("Generate & Download PDF"):
+                fn = "MediVista_Report.pdf"
+                doc = SimpleDocTemplate(fn, pagesize=A4)
+                parts = [Paragraph("MediVista Revenue Report", ParagraphStyle('Title', fontSize=18, spaceAfter=20)),
+                         Paragraph(f"Total Revenue: ₹{report_df['amount_paid'].sum()}", ParagraphStyle('Body', fontSize=12))]
+                doc.build(parts)
+                with open(fn, "rb") as f:
+                    st.download_button("Click to Download", f, file_name=fn)
+        else: st.warning("No data found.")
 
     conn.close()
