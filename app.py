@@ -10,24 +10,29 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
+import os
 
 # ================= DATABASE ================= #
 
+DB_NAME = "mediq.db"
+
 def connect_db():
-    return sqlite3.connect("mediq.db", check_same_thread=False)
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
     conn = connect_db()
     c = conn.cursor()
 
+    # USERS TABLE (Safe Create)
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
         email TEXT PRIMARY KEY,
-        password TEXT,
+        password BLOB,
         role TEXT
     )
     """)
 
+    # DOCTORS TABLE
     c.execute("""
     CREATE TABLE IF NOT EXISTS doctors(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +43,7 @@ def init_db():
     )
     """)
 
+    # PATIENTS TABLE
     c.execute("""
     CREATE TABLE IF NOT EXISTS patients(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +56,7 @@ def init_db():
     )
     """)
 
+    # APPOINTMENTS TABLE
     c.execute("""
     CREATE TABLE IF NOT EXISTS appointments(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +85,7 @@ def strong_password(password):
             re.search(r"[a-z]", password) and
             re.search(r"[0-9]", password))
 
-# ================= UI CONFIG ================= #
+# ================= CONFIG ================= #
 
 st.set_page_config(page_title="MediQ", layout="wide")
 
@@ -107,14 +114,14 @@ if not st.session_state.logged_in:
 
         if st.button("Create Account"):
             if not strong_password(password):
-                st.error("Weak password")
+                st.error("Password must contain uppercase, lowercase & number (min 8 chars)")
             else:
                 hashed = hash_password(password)
                 try:
                     c.execute("INSERT INTO users VALUES (?,?,?)",
-                              (email, hashed, role))
+                              (email, sqlite3.Binary(hashed), role))
                     conn.commit()
-                    st.success("Account Created")
+                    st.success("Account Created Successfully")
                 except:
                     st.error("User already exists")
 
@@ -130,9 +137,9 @@ if not st.session_state.logged_in:
                     st.session_state.role = role
                     st.rerun()
                 else:
-                    st.error("Invalid credentials")
+                    st.error("Invalid Credentials")
             else:
-                st.error("User not found")
+                st.error("User Not Found")
 
     conn.close()
 
@@ -163,12 +170,15 @@ else:
         patients = pd.read_sql_query("SELECT * FROM patients", conn)
         doctors = pd.read_sql_query("SELECT * FROM doctors", conn)
 
-        st.metric("Total Patients", len(patients))
-        st.metric("Total Doctors", len(doctors))
+        col1, col2 = st.columns(2)
+        col1.metric("Total Patients", len(patients))
+        col2.metric("Total Doctors", len(doctors))
 
         if not doctors.empty:
             doctors["Available Slots"] = doctors["total_slots"] - doctors["booked_slots"]
-            st.dataframe(doctors[["name", "specialty", "Available Slots"]])
+            fig = px.bar(doctors, x="name", y="Available Slots",
+                         title="Doctor Availability")
+            st.plotly_chart(fig, use_container_width=True)
 
     # ---------------- DOCTORS ---------------- #
 
@@ -177,7 +187,6 @@ else:
         if st.session_state.role == "Admin":
 
             st.subheader("Add Doctor")
-
             name = st.text_input("Name")
             specialty = st.text_input("Specialty")
             slots = st.number_input("Total Slots", 1, 100)
@@ -190,13 +199,13 @@ else:
                 st.rerun()
 
         st.subheader("Doctor List")
-
         doctors = pd.read_sql_query("SELECT * FROM doctors", conn)
-        for index, row in doctors.iterrows():
+
+        for _, row in doctors.iterrows():
             st.write(f"**{row['name']}** - {row['specialty']}")
 
             if st.session_state.role == "Admin":
-                if st.button(f"Delete {row['id']}"):
+                if st.button(f"Delete Doctor {row['id']}"):
                     c.execute("DELETE FROM doctors WHERE id=?", (row["id"],))
                     conn.commit()
                     st.rerun()
@@ -223,17 +232,8 @@ else:
             st.success("Patient Added")
             st.rerun()
 
-        st.subheader("Patient Records")
         patients = pd.read_sql_query("SELECT * FROM patients", conn)
-
-        for index, row in patients.iterrows():
-            st.write(f"{row['name']} - ₹{row['amount_paid']}")
-
-            if st.session_state.role == "Admin":
-                if st.button(f"Delete Patient {row['id']}"):
-                    c.execute("DELETE FROM patients WHERE id=?", (row["id"],))
-                    conn.commit()
-                    st.rerun()
+        st.dataframe(patients)
 
     # ---------------- APPOINTMENTS ---------------- #
 
@@ -271,31 +271,24 @@ else:
 
     elif page == "Reports":
 
-        st.subheader("Download Revenue Report (PDF)")
-
-        if st.button("Generate PDF"):
+        if st.button("Generate Revenue PDF"):
 
             patients = pd.read_sql_query("SELECT * FROM patients", conn)
+            total = patients["amount_paid"].sum()
 
-            doc = SimpleDocTemplate("report.pdf", pagesize=A4)
+            file_name = "MediQ_Report.pdf"
+            doc = SimpleDocTemplate(file_name, pagesize=A4)
             elements = []
 
-            style = ParagraphStyle(
-                name='Normal',
-                fontSize=12,
-                textColor=colors.black
-            )
+            style = ParagraphStyle(name='Normal', fontSize=12)
 
             elements.append(Paragraph("MediQ Revenue Report", style))
             elements.append(Spacer(1, 0.5 * inch))
-
-            total = patients["amount_paid"].sum()
-
             elements.append(Paragraph(f"Total Revenue: ₹{total}", style))
 
             doc.build(elements)
 
-            with open("report.pdf", "rb") as f:
-                st.download_button("Download PDF", f, file_name="MediQ_Report.pdf")
+            with open(file_name, "rb") as f:
+                st.download_button("Download Report", f, file_name=file_name)
 
     conn.close()
