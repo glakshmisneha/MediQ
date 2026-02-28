@@ -4,13 +4,14 @@ import pandas as pd
 import plotly.express as px
 import bcrypt
 import re
+import os
 from datetime import datetime, time, timedelta
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 
-# 1. Page Configuration
+# 1. Page Configuration (Must be the very first Streamlit command)
 st.set_page_config(page_title="MediVista Admin", layout="wide")
 
 DB_NAME = "mediq.db"
@@ -26,7 +27,7 @@ def init_db():
         booked_slots INTEGER DEFAULT 0, 
         nurse_assigned TEXT, shift_timing TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, blood_group TEXT, reason TEXT, amount_paid REAL, visit_date TEXT)")
-    # Updated appointments table to include time_slot
+    # Includes appointment_time for 20-min slot management
     c.execute("""CREATE TABLE IF NOT EXISTS appointments(
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         patient_id INTEGER, doctor_id INTEGER, 
@@ -34,14 +35,22 @@ def init_db():
     c.execute("CREATE TABLE IF NOT EXISTS queries(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, doctor_name TEXT, query TEXT, is_complaint INTEGER DEFAULT 0, status TEXT DEFAULT 'Open')")
     c.execute("CREATE TABLE IF NOT EXISTS rooms(room_no TEXT PRIMARY KEY, type TEXT, status TEXT DEFAULT 'Available')")
     
+    # Ensure schema is up to date
+    c.execute("PRAGMA table_info(doctors)")
+    existing_columns = [column[1] for column in c.fetchall()]
+    if 'nurse_assigned' not in existing_columns:
+        c.execute("ALTER TABLE doctors ADD COLUMN nurse_assigned TEXT DEFAULT 'Not Assigned'")
+    if 'shift_timing' not in existing_columns:
+        c.execute("ALTER TABLE doctors ADD COLUMN shift_timing TEXT DEFAULT '08:00 - 16:00'")
+        
     conn.commit()
     conn.close()
 
 init_db()
 
-# ================= HELPERS & LOGIC ================= #
+# ================= HELPER LOGIC ================= #
 def get_available_slots(doctor_id, shift_str, date_str):
-    """Generates 30-minute slots and filters out already booked ones"""
+    """Calculates available 20-minute intervals based on shift"""
     try:
         start_str, end_str = shift_str.split(" - ")
         start_dt = datetime.strptime(start_str, "%H:%M")
@@ -50,11 +59,11 @@ def get_available_slots(doctor_id, shift_str, date_str):
 
     slots = []
     current = start_dt
-    while current + timedelta(minutes=30) <= end_dt:
+    # Loop generates slots every 20 minutes
+    while current + timedelta(minutes=20) <= end_dt:
         slots.append(current.strftime("%H:%M"))
-        current += timedelta(minutes=30)
+        current += timedelta(minutes=20)
 
-    # Check database for existing bookings for this doctor on this date
     conn = sqlite3.connect(DB_NAME)
     booked = pd.read_sql_query("SELECT appointment_time FROM appointments WHERE doctor_id=? AND appointment_date=?", 
                                conn, params=(doctor_id, date_str))
@@ -75,6 +84,7 @@ st.markdown("""
     div[data-testid="stMetricValue"] { color: #ffffff; font-size: 38px; font-weight: bold; }
     .stButton>button { background-color: #00acee; color: white; border-radius: 20px; border: none; font-weight: bold; }
     .stSidebar { background-color: #0e1117; }
+    /* Position Logout to bottom-left corner */
     .sidebar-logout { position: fixed; bottom: 20px; left: 20px; width: 220px; z-index: 999; }
     [data-testid="stForm"] { border: 1px solid #30363d !important; border-radius: 15px; background-color: #161b22; }
     </style>
@@ -94,15 +104,15 @@ if not st.session_state.logged_in:
         role = st.selectbox("Role", ["Admin", "Receptionist", "Hospital Staff", "Doctor", "Patient"])
         if st.button("Create Account"):
             if not bool(re.match(r"^[a-zA-Z0-9._%+-]+@gmail\.com$", e_in)): st.error("Email must be @gmail.com")
-            elif len(p_in) < 8: st.error("Password must be 8+ characters")
+            elif len(p_in) < 8 or not any(c.isupper() for c in p_in): st.error("Password: 8+ chars & 1 Uppercase")
             else:
                 conn = sqlite3.connect(DB_NAME)
                 hashed = bcrypt.hashpw(p_in.encode(), bcrypt.gensalt())
                 try:
                     conn.execute("INSERT INTO users VALUES (?,?,?)", (e_in, sqlite3.Binary(hashed), role))
                     conn.commit()
-                    st.success("Registered successfully!")
-                except: st.error("User exists.")
+                    st.success("Registration Successful!")
+                except: st.error("User already exists.")
                 conn.close()
 
     if mode == "Login":
@@ -118,13 +128,17 @@ if not st.session_state.logged_in:
 # ================= MAIN APPLICATION ================= #
 else:
     with st.sidebar:
-        st.title("MediVista Admin")
+        st.title("MediVista")
+        st.write(f"**Current Role:** {st.session_state.role}")
+        
+        # Navigation logic based on role
         if st.session_state.role == "Admin":
             nav = st.radio("Navigation", ["Dashboard", "Doctors Allotment", "Patient Details", "Room Management", "Reports"])
         elif st.session_state.role == "Receptionist":
-            nav = st.radio("Navigation", ["Receptionist Area"])
-        else: nav = st.radio("Navigation", ["Portal"])
+            nav = st.radio("Navigation", ["Reception Area"])
+        else: nav = "Portal"
 
+        # Logout button anchored to the bottom-left
         st.markdown('<div class="sidebar-logout">', unsafe_allow_html=True)
         if st.button("Logout", use_container_width=True):
             st.session_state.logged_in = False
@@ -139,6 +153,8 @@ else:
         if nav == "Dashboard":
             st.title("Hospital Dashboard")
             p_df = pd.read_sql_query("SELECT * FROM patients", conn)
+            
+            # Metrics Row
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Visits", len(p_df))
             m2.metric("Total Revenue", f"₹ {p_df['amount_paid'].sum() if not p_df.empty else 0.0}")
@@ -146,111 +162,124 @@ else:
             m4.metric("Appointments", pd.read_sql_query("SELECT COUNT(*) FROM appointments", conn).iloc[0,0])
 
             st.divider()
-            g1, g2, g3 = st.columns(3)
-            with g1:
-                st.write("### Visits by Reason")
-                if not p_df.empty:
+            
+            # Graphs
+            if not p_df.empty:
+                g1, g2, g3 = st.columns(3)
+                with g1:
                     fig1 = px.bar(p_df['reason'].value_counts().reset_index(), x='reason', y='count', color_discrete_sequence=['#87CEFA'])
-                    fig1.update_layout(template="plotly_dark")
+                    fig1.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig1, width='stretch')
-            with g2:
-                st.write("### Revenue Trend")
-                if not p_df.empty:
+                with g2:
                     fig2 = px.line(p_df.groupby('visit_date')['amount_paid'].sum().reset_index(), x='visit_date', y='amount_paid', markers=True)
                     fig2.update_layout(template="plotly_dark")
                     st.plotly_chart(fig2, width='stretch')
-            with g3:
-                st.write("### Doctor Availability")
-                doc_avail = pd.read_sql_query("SELECT name, shift_timing FROM doctors", conn)
-                st.table(doc_avail)
+                with g3:
+                    doc_w = pd.read_sql_query("SELECT name, booked_slots FROM doctors", conn)
+                    fig3 = px.bar(doc_w, x='name', y='booked_slots', color_discrete_sequence=['#87CEFA'])
+                    fig3.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig3, width='stretch')
 
         elif nav == "Doctors Allotment":
-            st.title("Manage Staff & Shifts")
-            tab_add, tab_edit = st.tabs(["➕ Add Doctor", "✏️ Edit Doctor"])
+            st.title("Staff & Shift Allotment")
+            tab_add, tab_edit = st.tabs(["➕ Add Doctor", "✏️ Edit Records"])
             with tab_add:
                 with st.form("admin_add_doc"):
-                    dn, ds = st.text_input("Doctor Name"), st.selectbox("Specialty", ["General", "Cardiology", "Neurology"])
-                    nr = st.text_input("Nurse Name")
-                    t_st, t_en = st.time_input("Start"), st.time_input("End")
-                    if st.form_submit_button("Save Doctor"):
+                    dn, ds = st.text_input("Doctor Name"), st.selectbox("Specialty", ["General", "Pediatrics", "ICU"])
+                    nr = st.text_input("Allocate Nurse")
+                    t_st, t_en = st.time_input("Shift Start"), st.time_input("Shift End")
+                    if st.form_submit_button("Save Details"):
                         shft = f"{t_st.strftime('%H:%M')} - {t_en.strftime('%H:%M')}"
                         conn.execute("INSERT INTO doctors (name, specialty, total_slots, nurse_assigned, shift_timing) VALUES (?,?,?,?,?)", (dn, ds, 10, nr, shft))
                         conn.commit(); st.rerun()
             with tab_edit:
                 docs = pd.read_sql_query("SELECT * FROM doctors", conn)
-                if not docs.empty:
-                    sel_doc = st.selectbox("Select Doctor", docs['name'])
-                    with st.form("edit_doc"):
-                        up_nr = st.text_input("New Nurse", docs[docs['name']==sel_doc].iloc[0]['nurse_assigned'])
-                        if st.form_submit_button("Update"):
-                            conn.execute("UPDATE doctors SET nurse_assigned=? WHERE name=?", (up_nr, sel_doc))
-                            conn.commit(); st.rerun()
+                st.dataframe(docs, width='stretch')
 
         elif nav == "Patient Details":
-            st.title("📂 Patient Records")
+            st.title("📂 Patient Information")
             patients = pd.read_sql_query("SELECT * FROM patients", conn)
             st.dataframe(patients, width='stretch')
-            sel_p = st.selectbox("Edit Patient", patients['name'])
-            with st.form("edit_p"):
-                new_reason = st.text_input("Update Reason", patients[patients['name']==sel_p].iloc[0]['reason'])
-                if st.form_submit_button("Update Details"):
-                    conn.execute("UPDATE patients SET reason=? WHERE name=?", (new_reason, sel_p))
-                    conn.commit(); st.rerun()
+            # Edit Option for Admin
+            if not patients.empty:
+                sel_p = st.selectbox("Select Patient to Edit", patients['name'])
+                with st.form("edit_patient"):
+                    new_r = st.text_input("Update Reason", patients[patients['name']==sel_p].iloc[0]['reason'])
+                    if st.form_submit_button("Update Info"):
+                        conn.execute("UPDATE patients SET reason=? WHERE name=?", (new_r, sel_p))
+                        conn.commit(); st.rerun()
 
-    # ---------------- RECEPTIONIST INTERFACE (UPDATED SLOTS) ---------------- #
+        elif nav == "Room Management":
+            st.title("🛌 Hospital Room Management")
+            rooms = pd.read_sql_query("SELECT * FROM rooms", conn)
+            st.dataframe(rooms, width='stretch')
+            with st.expander("➕ Add New Room"):
+                with st.form("add_room"):
+                    r_no, r_ty = st.text_input("Room No"), st.selectbox("Type", ["General", "Private", "ICU"])
+                    if st.form_submit_button("Register"):
+                        conn.execute("INSERT INTO rooms (room_no, type) VALUES (?,?)", (r_no, r_ty))
+                        conn.commit(); st.rerun()
+
+        elif nav == "Reports":
+            st.title("📊 Hospital Reports")
+            report_df = pd.read_sql_query("SELECT name, reason, amount_paid, visit_date FROM patients", conn)
+            if not report_df.empty:
+                st.metric("Gross Revenue Preview", f"₹ {report_df['amount_paid'].sum():,.2f}")
+                st.dataframe(report_df, width='stretch')
+                if st.button("Generate PDF Report"):
+                    fn = f"Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+                    doc = SimpleDocTemplate(fn, pagesize=A4)
+                    parts = [Paragraph("<b>MediVista Hospital Revenue Report</b>", ParagraphStyle('Title', fontSize=22, alignment=1))]
+                    doc.build(parts)
+                    with open(fn, "rb") as f:
+                        st.download_button("Download Now", f, file_name=fn)
+
+    # ---------------- RECEPTIONIST INTERFACE (20-MIN SLOTS) ---------------- #
     elif st.session_state.role == "Receptionist":
-        st.title("📞 Reception Management")
-        t1, t2, t3 = st.tabs(["Register Patient", "Bookings", "Edit Records"])
+        st.title("📞 Receptionist Area")
+        t1, t2, t3 = st.tabs(["Register Patient", "20-Min Slot Booking", "Edit Records"])
         
         with t1:
-            with st.form("rec_add_p"):
-                p_n, p_a = st.text_input("Name"), st.number_input("Age", 1, 120, 25)
-                p_b = st.selectbox("Blood", ["A+", "B+", "O+", "AB+", "A-", "B-", "O-", "AB-"])
-                p_r, p_p = st.text_input("Reason"), st.number_input("Payment (₹)", 0.0)
+            with st.form("rec_reg_patient"):
+                st.subheader("Add New Patient")
+                pn = st.text_input("Patient Full Name")
+                pa = st.number_input("Age", 1, 120, 25)
+                pb = st.selectbox("Blood Group", ["A+", "B+", "O+", "AB+", "A-", "B-", "O-", "AB-"])
+                pr = st.text_input("Reason")
                 if st.form_submit_button("Register"):
-                    conn.execute("INSERT INTO patients (name, age, blood_group, reason, amount_paid, visit_date) VALUES (?,?,?,?,?,?)", (p_n, p_a, p_b, p_r, p_p, today_str))
-                    conn.commit(); st.success("Registered!")
+                    conn.execute("INSERT INTO patients (name, age, blood_group, reason, visit_date) VALUES (?,?,?,?,?)", (pn, pa, pb, pr, today_str))
+                    conn.commit(); st.success(f"Patient {pn} Added!")
 
         with t2:
-            st.subheader("📅 Book 30-Min Slot")
+            st.subheader("📅 Book 20-Minute Time Slot")
             p_list = pd.read_sql_query("SELECT id, name FROM patients", conn)
             d_list = pd.read_sql_query("SELECT id, name, shift_timing FROM doctors", conn)
             
             if not p_list.empty and not d_list.empty:
                 col_p, col_d = st.columns(2)
-                pat_name = col_p.selectbox("Patient", p_list['name'])
-                doc_name = col_d.selectbox("Doctor", d_list['name'])
+                pat_sel = col_p.selectbox("Patient", p_list['name'])
+                doc_sel = col_d.selectbox("Doctor", d_list['name'])
                 
-                # Fetch available 30-min slots
-                doc_row = d_list[d_list['name'] == doc_name].iloc[0]
-                avail_slots = get_available_slots(doc_row['id'], doc_row['shift_timing'], today_str)
+                # Fetching 20-min intervals
+                dr_data = d_list[d_list['name'] == doc_sel].iloc[0]
+                avail_slots = get_available_slots(dr_data['id'], dr_data['shift_timing'], today_str)
                 
                 if avail_slots:
-                    sel_time = st.selectbox("Available Time Slots (30 mins each)", avail_slots)
-                    if st.button("Confirm Booking"):
-                        pid = p_list[p_list['name'] == pat_name]['id'].iloc[0]
+                    sel_time = st.selectbox("Select Available 20-Min Slot", avail_slots)
+                    if st.button("Confirm Appointment"):
+                        pid = p_list[p_list['name'] == pat_sel]['id'].iloc[0]
                         conn.execute("INSERT INTO appointments (patient_id, doctor_id, appointment_date, appointment_time) VALUES (?,?,?,?)", 
-                                     (int(pid), int(doc_row['id']), today_str, sel_time))
-                        conn.commit(); st.success(f"Booked at {sel_time}!")
-                else:
-                    st.error("No slots available for this doctor today.")
+                                     (int(pid), int(dr_data['id']), today_str, sel_time))
+                        conn.commit(); st.success(f"Appointment set for {sel_time}!")
+                        st.rerun()
+                else: st.error("No 20-minute slots left for this shift.")
             
             st.divider()
             st.write("### Today's Schedule")
             schedule = pd.read_sql_query(f"""
-                SELECT p.name as Patient, d.name as Doctor, a.appointment_time 
+                SELECT p.name as Patient, d.name as Doctor, a.appointment_time as 'Time'
                 FROM appointments a JOIN patients p ON a.patient_id=p.id JOIN doctors d ON a.doctor_id=d.id 
-                WHERE a.appointment_date='{today_str}' ORDER BY a.appointment_time ASC""", conn)
+                WHERE a.appointment_date='{today_str}' ORDER BY Time ASC""", conn)
             st.dataframe(schedule, width='stretch')
-
-        with t3:
-            p_edit = pd.read_sql_query("SELECT name, age, reason FROM patients", conn)
-            if not p_edit.empty:
-                target = st.selectbox("Select Patient to Edit", p_edit['name'], key="rec_p_edit")
-                with st.form("rec_p_edit_form"):
-                    up_age = st.number_input("Age", 1, 120, int(p_edit[p_edit['name']==target].iloc[0]['age']))
-                    if st.form_submit_button("Update"):
-                        conn.execute("UPDATE patients SET age=? WHERE name=?", (up_age, target))
-                        conn.commit(); st.rerun()
 
     conn.close()
